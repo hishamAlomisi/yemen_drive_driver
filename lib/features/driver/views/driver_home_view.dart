@@ -1,14 +1,28 @@
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../controllers/driver_controller.dart';
+import '../driver_routes.dart';
+import 'driver_chat_view.dart';
 
 class DriverHomeView extends GetView<DriverController> {
   const DriverHomeView({super.key});
   @override
   Widget build(BuildContext context) => Scaffold(
       appBar: AppBar(title: const Text('لوحة السائق'), actions: [
+        Obx(() => IconButton(
+              onPressed: controller.showNotifications,
+              icon: Badge(
+                isLabelVisible: controller.unreadNotifications > 0,
+                label: Text('${controller.unreadNotifications}'),
+                child: const Icon(Icons.notifications_outlined),
+              ),
+            )),
         IconButton(onPressed: controller.load, icon: const Icon(Icons.refresh)),
+        IconButton(
+            onPressed: () => Get.toNamed<void>(DriverRoutes.history),
+            icon: const Icon(Icons.history)),
         IconButton(
             onPressed: controller.signOut, icon: const Icon(Icons.logout))
       ]),
@@ -132,11 +146,45 @@ class DriverHomeView extends GetView<DriverController> {
                         icon: const Icon(Icons.play_arrow),
                         label: const Text('بدء الرحلة')),
                   if (assigned && state == 5)
-                    FilledButton.icon(
-                        onPressed: () =>
-                            controller.updateStatus(ride, 6, 'مكتملة'),
-                        icon: const Icon(Icons.flag),
-                        label: const Text('إنهاء الرحلة'))
+                    ...[
+                      FilledButton.icon(
+                          onPressed: () => controller.openCashPayment(ride),
+                          icon: const Icon(Icons.payments_outlined),
+                          label: const Text('تحصيل الدفع')),
+                      const SizedBox(height: 8),
+                      OutlinedButton.icon(
+                          onPressed: () => Get.to<void>(() => DriverChatView(
+                              rideId: '${ride['id']}')),
+                          icon: const Icon(Icons.chat_bubble_outline),
+                          label: const Text('محادثة العميل')),
+                      const SizedBox(height: 8),
+                      OutlinedButton.icon(
+                        onPressed: () => _callCustomer(ride['customerPhone']),
+                        icon: const Icon(Icons.phone_outlined),
+                        label: const Text('اتصال بالعميل'),
+                      )
+                    ],
+                  if (assigned && state == 4)
+                    OutlinedButton.icon(
+                        onPressed: () => Get.to<void>(() => DriverChatView(
+                            rideId: '${ride['id']}')),
+                        icon: const Icon(Icons.chat_bubble_outline),
+                        label: const Text('محادثة العميل')),
+                  if (assigned && (state == 3 || state == 4 || state == 5))
+                    OutlinedButton.icon(
+                      onPressed: () => _callCustomer(ride['customerPhone']),
+                      icon: const Icon(Icons.phone_outlined),
+                      label: const Text('اتصال بالعميل'),
+                    )
                 ])));
+  }
+
+  Future<void> _callCustomer(Object? phone) async {
+    final value = phone?.toString().trim();
+    if (value == null || value.isEmpty) return;
+    final uri = Uri(scheme: 'tel', path: value);
+    if (!await launchUrl(uri)) {
+      Get.snackbar('تعذر الاتصال', 'لم يتمكن الجهاز من فتح تطبيق الهاتف.');
+    }
   }
 }

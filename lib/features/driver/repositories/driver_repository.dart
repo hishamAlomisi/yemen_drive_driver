@@ -15,6 +15,8 @@ abstract interface class DriverRepository {
       {required int driverId,
       required double latitude,
       required double longitude});
+  Future<void> registerCashPayment({required int rideId, required num cashReceived});
+  Future<List<Map<String, Object?>>> notifications();
 }
 
 class ApiDriverRepository implements DriverRepository {
@@ -82,4 +84,16 @@ class ApiDriverRepository implements DriverRepository {
         'longitude': longitude,
         'isOnline': true
       });
+
+  @override
+  Future<void> registerCashPayment({required int rideId, required num cashReceived}) =>
+      _provider.execute('DriverCashPaymentModel', 'add', <String, Object?>{
+        'rideId': rideId,
+        'cashReceived': cashReceived,
+        'currency': 'YER',
+      });
+
+  @override
+  Future<List<Map<String, Object?>>> notifications() =>
+      _provider.list('NotificationModel');
 }
