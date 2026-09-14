@@ -58,11 +58,20 @@ class _DriverPaymentViewState extends State<DriverPaymentView> {
     }
     setState(() => _saving = true);
     try {
-      await widget.repository.registerCashPayment(
+      final result = await widget.repository.registerCashPayment(
         rideId: rideId,
         cashReceived: amount,
       );
       if (mounted) {
+        if (result['requiresCustomerApproval'] == true) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('أُرسل طلب موافقة للعميل على خصم الفرق من محفظته. انتظر القرار ثم أعد تسجيل المبلغ نفسه.')));
+          Navigator.of(context).pop();
+          return;
+        }
+        if (result['rejected'] == true) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('رُفض التحصيل: رصيد محفظة العميل لا يكفي لتغطية الفرق.')));
+          return;
+        }
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('تم تسجيل الدفع وإكمال الرحلة.')),
         );

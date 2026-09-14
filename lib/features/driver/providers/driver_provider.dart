@@ -55,6 +55,14 @@ class DriverProvider {
     if (result is ApiFailure<Object?>) throw result.problem;
   }
 
+  Future<Map<String, Object?>> executeData(
+      String model, String operation, Map<String, Object?> data) async {
+    final result = await _client.execute<Object?>(model: model, operation: operation, data: data);
+    if (result is ApiFailure<Object?>) throw result.problem;
+    final dataValue = (result as ApiSuccess<Object?>).data;
+    return dataValue is Map ? Map<String, Object?>.from(dataValue) : <String, Object?>{};
+  }
+
   DriverAuthResult _auth(Map<String, Object?> body) {
     final data = body['data'];
     final payload = data is Map ? Map<String, Object?>.from(data) : body;
