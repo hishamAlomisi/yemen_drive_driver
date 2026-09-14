@@ -88,6 +88,11 @@ class DriverHomeView extends GetView<DriverController> {
     final assigned =
         ride['driverId']?.toString() == controller.currentUserId?.toString();
     final state = int.tryParse('${ride['status']}') ?? 0;
+    final offerStatus = int.tryParse('${ride['driverOfferStatus']}');
+    final canSendOrEditOffer = !assigned &&
+        ride['driverId'] == null &&
+        (state == 1 || state == 2) &&
+        (offerStatus == null || offerStatus == 0);
     const labels = {
       0: 'مسودة',
       1: 'تبحث عن سائق',
@@ -118,15 +123,18 @@ class DriverHomeView extends GetView<DriverController> {
                   Text('السعر: ${ride['customerPrice'] ?? '-'} ر.ي'),
                   if (ride['driverOfferAmount'] != null) ...[
                     const SizedBox(height: 4),
-                    Text('عرضك الحالي: ${ride['driverOfferAmount']} ر.ي',
+                    Text(
+                        offerStatus == 2
+                            ? 'تم رفض عرضك: ${ride['driverOfferAmount']} ر.ي'
+                            : offerStatus == 3
+                                ? 'انتهت صلاحية عرضك: ${ride['driverOfferAmount']} ر.ي'
+                                : 'عرضك الحالي: ${ride['driverOfferAmount']} ر.ي',
                         style: TextStyle(
                             color: Theme.of(context).colorScheme.primary,
                             fontWeight: FontWeight.w600)),
                   ],
                   const SizedBox(height: 10),
-                  if (!assigned &&
-                      ride['driverId'] == null &&
-                      (state == 1 || state == 2))
+                  if (canSendOrEditOffer)
                     FilledButton.icon(
                         onPressed: () => controller.sendOffer(ride),
                         icon: const Icon(Icons.local_offer_outlined),
@@ -145,32 +153,31 @@ class DriverHomeView extends GetView<DriverController> {
                             controller.updateStatus(ride, 5, 'بدأت الرحلة'),
                         icon: const Icon(Icons.play_arrow),
                         label: const Text('بدء الرحلة')),
-                  if (assigned && state == 5)
-                    ...[
-                      FilledButton.icon(
-                          onPressed: () => controller.openCashPayment(ride),
-                          icon: const Icon(Icons.payments_outlined),
-                          label: const Text('تحصيل الدفع')),
-                      const SizedBox(height: 8),
-                      OutlinedButton.icon(
-                          onPressed: () => Get.to<void>(() => DriverChatView(
-                              rideId: '${ride['id']}')),
-                          icon: const Icon(Icons.chat_bubble_outline),
-                          label: const Text('محادثة العميل')),
-                      const SizedBox(height: 8),
-                      OutlinedButton.icon(
-                        onPressed: () => _callCustomer(ride['customerPhone']),
-                        icon: const Icon(Icons.phone_outlined),
-                        label: const Text('اتصال بالعميل'),
-                      )
-                    ],
-                  if (assigned && state == 4)
+                  if (assigned && state == 5) ...[
+                    FilledButton.icon(
+                        onPressed: () => controller.openCashPayment(ride),
+                        icon: const Icon(Icons.payments_outlined),
+                        label: const Text('تحصيل الدفع')),
+                    const SizedBox(height: 8),
                     OutlinedButton.icon(
-                        onPressed: () => Get.to<void>(() => DriverChatView(
-                            rideId: '${ride['id']}')),
+                        onPressed: () => Get.to<void>(
+                            () => DriverChatView(rideId: '${ride['id']}')),
                         icon: const Icon(Icons.chat_bubble_outline),
                         label: const Text('محادثة العميل')),
-                  if (assigned && (state == 3 || state == 4 || state == 5))
+                    const SizedBox(height: 8),
+                    OutlinedButton.icon(
+                      onPressed: () => _callCustomer(ride['customerPhone']),
+                      icon: const Icon(Icons.phone_outlined),
+                      label: const Text('اتصال بالعميل'),
+                    )
+                  ],
+                  if (assigned && state == 4)
+                    OutlinedButton.icon(
+                        onPressed: () => Get.to<void>(
+                            () => DriverChatView(rideId: '${ride['id']}')),
+                        icon: const Icon(Icons.chat_bubble_outline),
+                        label: const Text('محادثة العميل')),
+                  if (assigned && (state == 3 || state == 4))
                     OutlinedButton.icon(
                       onPressed: () => _callCustomer(ride['customerPhone']),
                       icon: const Icon(Icons.phone_outlined),

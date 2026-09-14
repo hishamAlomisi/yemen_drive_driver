@@ -3,7 +3,8 @@ import 'package:flutter/material.dart';
 import '../repositories/driver_repository.dart';
 
 class DriverPaymentView extends StatefulWidget {
-  const DriverPaymentView({required this.ride, required this.repository, super.key});
+  const DriverPaymentView(
+      {required this.ride, required this.repository, super.key});
   final Map<String, Object?> ride;
   final DriverRepository repository;
 
@@ -18,8 +19,27 @@ class _DriverPaymentViewState extends State<DriverPaymentView> {
   @override
   void initState() {
     super.initState();
-    _cash = TextEditingController(text: '${widget.ride['customerPrice'] ?? ''}');
+    _cash = TextEditingController(text: _totalDue.toStringAsFixed(0));
   }
+
+  double get _fare => _number(widget.ride['customerPrice']);
+  double get _serviceFee => _number(widget.ride['serviceFee']);
+  double get _totalDue {
+    final stored = _number(widget.ride['totalAmount']);
+    return stored > 0 ? stored : _fare + _serviceFee;
+  }
+
+  double get _commission => _number(widget.ride['driverCommissionAmount']);
+  double get _platformReceivable {
+    final stored = _number(widget.ride['platformShare']);
+    return stored > 0 ? stored : _serviceFee + _commission;
+  }
+
+  double get _driverNet => _number(widget.ride['driverShare']) > 0
+      ? _number(widget.ride['driverShare'])
+      : _fare - _commission;
+  double _number(Object? value) =>
+      value is num ? value.toDouble() : double.tryParse('${value ?? ''}') ?? 0;
 
   @override
   void dispose() {
@@ -65,14 +85,27 @@ class _DriverPaymentViewState extends State<DriverPaymentView> {
         body: ListView(
           padding: const EdgeInsets.all(20),
           children: [
-            Text('رحلة #${widget.ride['id']}', style: Theme.of(context).textTheme.titleLarge),
+            Text('رحلة #${widget.ride['id']}',
+                style: Theme.of(context).textTheme.titleLarge),
             const SizedBox(height: 12),
-            Text('الأجرة المتفق عليها: ${widget.ride['customerPrice'] ?? '-'} ر.ي'),
+            Text('أجرة الرحلة: ${_fare.toStringAsFixed(0)} ر.ي'),
+            Text('رسم الخدمة من العميل: ${_serviceFee.toStringAsFixed(0)} ر.ي'),
+            Text('إجمالي المطلوب تحصيله: ${_totalDue.toStringAsFixed(0)} ر.ي',
+                style: const TextStyle(fontWeight: FontWeight.bold)),
+            const Divider(height: 28),
+            Text('عمولتك للمنصة: ${_commission.toStringAsFixed(0)} ر.ي'),
+            Text(
+                'رسم الخدمة المستحق للمنصة: ${_serviceFee.toStringAsFixed(0)} ر.ي'),
+            Text(
+                'مديونيتك بعد التحصيل النقدي: ${_platformReceivable.toStringAsFixed(0)} ر.ي'),
+            Text('صافي مستحقك من الأجرة: ${_driverNet.toStringAsFixed(0)} ر.ي',
+                style: const TextStyle(fontWeight: FontWeight.bold)),
             const SizedBox(height: 20),
             TextField(
               controller: _cash,
               enabled: !_saving,
-              keyboardType: const TextInputType.numberWithOptions(decimal: true),
+              keyboardType:
+                  const TextInputType.numberWithOptions(decimal: true),
               decoration: const InputDecoration(
                 labelText: 'المبلغ المقبوض من العميل',
                 suffixText: 'ر.ي',
@@ -83,13 +116,16 @@ class _DriverPaymentViewState extends State<DriverPaymentView> {
             FilledButton.icon(
               onPressed: _saving ? null : _submit,
               icon: _saving
-                  ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2))
                   : const Icon(Icons.payments_outlined),
               label: const Text('تسجيل الدفع وإنهاء الرحلة'),
             ),
             const SizedBox(height: 12),
             const Text(
-              'إذا كان المبلغ أكبر من الأجرة، يضاف الفرق إلى محفظة العميل. وإذا كان أقل، يخصم الفرق من محفظته عند توفر الرصيد؛ وإلا ترفض العملية.',
+              'إذا كان المبلغ أكبر من الإجمالي، يضاف الفرق إلى محفظة العميل. وإذا كان أقل، يخصم الفرق من محفظته عند توفر الرصيد؛ وإلا ترفض العملية. يظهر أعلاه الدين المسجل للمنصة ولا يخصم مباشرة من محفظتك.',
             ),
           ],
         ),

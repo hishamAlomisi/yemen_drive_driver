@@ -4,6 +4,7 @@ import 'dart:async';
 
 import '../../../core/network/api_client.dart';
 import '../../../core/network/api_models.dart';
+import '../../../core/services/auth_session_service.dart';
 
 class DriverChatView extends StatefulWidget {
   const DriverChatView({required this.rideId, super.key});
@@ -19,6 +20,7 @@ class _DriverChatViewState extends State<DriverChatView> {
   bool _sending = false;
   Timer? _polling;
   ApiClient get _api => Get.find<ApiClient>();
+  AuthSessionService get _session => Get.find<AuthSessionService>();
 
   @override
   void initState() {
@@ -98,8 +100,15 @@ class _DriverChatViewState extends State<DriverChatView> {
                             itemCount: _messages.length,
                             itemBuilder: (_, i) {
                               final m = _messages[i];
+                              final senderId =
+                                  int.tryParse('${m['senderId'] ?? ''}');
+                              final isDriverMessage =
+                                  senderId != null &&
+                                      senderId == _session.currentUserId.value;
                               return Align(
-                                  alignment: AlignmentDirectional.centerStart,
+                                  alignment: isDriverMessage
+                                      ? AlignmentDirectional.centerStart
+                                      : AlignmentDirectional.centerEnd,
                                   child: Card(
                                       child: Padding(
                                           padding: const EdgeInsets.all(10),
