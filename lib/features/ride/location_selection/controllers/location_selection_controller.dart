@@ -36,6 +36,8 @@ class LocationController extends GetxController {
   bool _initialLocationRequested = false;
   final RxBool isRouteLoading = false.obs;
   final RxList<LatLng> routePoints = <LatLng>[].obs;
+  final RxInt routeDistanceMeters = 0.obs;
+  final RxInt routeDurationSeconds = 0.obs;
   final RxList<LocationSearchResult> searchResults =
       <LocationSearchResult>[].obs;
   final RxBool isSearching = false.obs;
@@ -424,12 +426,13 @@ class LocationController extends GetxController {
     isRouteLoading.value = true;
     routePoints.clear();
     try {
-      final points = await _routeRepository.getDrivingRoute(
+      final route = await _routeRepository.getDrivingRoute(
         origin: start,
         destination: end,
       );
-
-      routePoints.assignAll(points);
+      routePoints.assignAll(route.points);
+      routeDistanceMeters.value = route.distanceMeters;
+      routeDurationSeconds.value = route.durationSeconds;
     } on RouteRequestException {
       Get.snackbar(
         'تعذر حساب المسار',
@@ -480,4 +483,3 @@ class LocationController extends GetxController {
     super.onClose();
   }
 }
-

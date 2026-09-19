@@ -25,15 +25,6 @@ Future<void> main() async {
     googleMapsApiKey: const String.fromEnvironment(
       'GOOGLE_MAPS_API_KEY',
     ),
-    googleRoutesApiKey: const String.fromEnvironment(
-      'GOOGLE_ROUTES_API_KEY',
-    ),
-    googleGeocodingApiKey: const String.fromEnvironment(
-      'GOOGLE_GEOCODING_API_KEY',
-    ),
-    googlePlacesApiKey: const String.fromEnvironment(
-      'GOOGLE_PLACES_API_KEY',
-    ),
     androidPackageName: const String.fromEnvironment(
       'ANDROID_PACKAGE_NAME',
       defaultValue: '',
@@ -46,4 +37,3 @@ Future<void> main() async {
   );
   runApp(const EasyRideApp());
 }
-

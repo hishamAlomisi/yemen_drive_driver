@@ -57,6 +57,15 @@ class DriverLoginView extends GetView<DriverLoginController> {
                           prefixIcon: Icon(Icons.lock_outline),
                         ),
                       ),
+                    if (controller.challengeId.value == null)
+                      CheckboxListTile(
+                        value: controller.rememberMe.value,
+                        onChanged: controller.toggleRememberMe,
+                        controlAffinity: ListTileControlAffinity.leading,
+                        contentPadding: EdgeInsets.zero,
+                        dense: true,
+                        title: const Text('تذكرني على هذا الجهاز'),
+                      ),
                     if (controller.challengeId.value != null)
                       TextField(
                         controller: controller.otpController,

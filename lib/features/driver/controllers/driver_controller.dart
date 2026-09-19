@@ -1,7 +1,9 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:get/get.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../../../core/services/auth_session_service.dart';
 import '../repositories/driver_repository.dart';
@@ -18,7 +20,11 @@ class DriverController extends GetxController {
   final rides = <Map<String, Object?>>[].obs;
   final notifications = <Map<String, Object?>>[].obs;
   Timer? _ridesPollingTimer;
+  StreamSubscription<Position>? _locationSubscription;
   bool _refreshInFlight = false;
+  bool _locationUpdateInFlight = false;
+  DateTime? _lastLocationSentAt;
+  Position? _lastSentPosition;
 
   int? get currentUserId => _session.currentUserId.value;
 
@@ -26,6 +32,7 @@ class DriverController extends GetxController {
   void onReady() {
     super.onReady();
     unawaited(_startRidesPolling());
+    unawaited(_startRealLocationUpdates());
   }
 
   Future<void> _startRidesPolling() async {
@@ -112,15 +119,135 @@ class DriverController extends GetxController {
     await load(showLoading: false);
   }
 
+  Future<void> openPickupNavigation(Map<String, Object?> ride) =>
+      _openNavigation(ride['pickupLatitude'], ride['pickupLongitude']);
+
+  Future<void> openDestinationNavigation(Map<String, Object?> ride) async {
+    if (ride['destinationAvailable'] != true) {
+      Get.snackbar('الوجهة محمية', 'تظهر إحداثيات الوجهة بعد قبول العرض فقط.');
+      return;
+    }
+    await _openNavigation(
+        ride['destinationLatitude'], ride['destinationLongitude']);
+  }
+
+  Future<void> _openNavigation(Object? latitude, Object? longitude) async {
+    final lat = double.tryParse('$latitude');
+    final lng = double.tryParse('$longitude');
+    if (lat == null || lng == null) {
+      Get.snackbar('المسار غير متاح', 'لا توجد إحداثيات صالحة لفتح المسار.');
+      return;
+    }
+    final uri = Uri.https('www.google.com', '/maps/dir/', <String, String>{
+      'api': '1',
+      'destination': '$lat,$lng',
+      'travelmode': 'driving',
+    });
+    if (!await launchUrl(uri, mode: LaunchMode.externalApplication)) {
+      Get.snackbar('تعذر فتح الخريطة', 'لم يتمكن الجهاز من فتح تطبيق الخرائط.');
+    }
+  }
+
   Future<void> updateLocation() async {
-    final id = _session.currentUserId.value;
-    if (id == null) return;
+    final ready = await _ensureLocationAccess(showMessage: true);
+    if (!ready) return;
+    try {
+      final position = await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.high,
+        ),
+      );
+      await _publishLocation(position, showMessage: true, force: true);
+    } catch (exception) {
+      Get.snackbar('تعذر تحديث الموقع', 'تعذر قراءة موقع الجهاز الحالي.');
+    }
+  }
+
+  Future<void> _startRealLocationUpdates() async {
+    final ready = await _ensureLocationAccess();
+    if (!ready) return;
+    try {
+      final current = await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.high,
+        ),
+      );
+      await _publishLocation(current);
+      await _locationSubscription?.cancel();
+      _locationSubscription = Geolocator.getPositionStream(
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.high,
+          distanceFilter: 20,
+        ),
+      ).listen(
+        (position) => unawaited(_publishLocation(position)),
+        onError: (_) {},
+      );
+    } catch (_) {
+      // The driver can still retry explicitly with the location button.
+    }
+  }
+
+  Future<bool> _ensureLocationAccess({bool showMessage = false}) async {
+    if (!await Geolocator.isLocationServiceEnabled()) {
+      if (showMessage) {
+        Get.snackbar('الموقع غير مفعل', 'فعّل خدمة الموقع في الجهاز أولًا.');
+      }
+      return false;
+    }
+    var permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+    }
+    if (permission == LocationPermission.denied ||
+        permission == LocationPermission.deniedForever) {
+      if (showMessage) {
+        Get.snackbar('صلاحية الموقع مطلوبة',
+            'امنح تطبيق السائق صلاحية الموقع لتحديث موقعك الحقيقي.');
+      }
+      return false;
+    }
+    return true;
+  }
+
+  Future<void> _publishLocation(
+    Position position, {
+    bool showMessage = false,
+    bool force = false,
+  }) async {
+    final driverId = _session.currentUserId.value;
+    if (driverId == null || _locationUpdateInFlight) return;
+    final previous = _lastSentPosition;
+    final lastUpdate = _lastLocationSentAt;
+    final movedMeters = previous == null
+        ? double.infinity
+        : Geolocator.distanceBetween(
+            previous.latitude,
+            previous.longitude,
+            position.latitude,
+            position.longitude,
+          );
+    if (!force &&
+        lastUpdate != null &&
+        DateTime.now().difference(lastUpdate) < const Duration(seconds: 15) &&
+        movedMeters < 20) {
+      return;
+    }
+
+    _locationUpdateInFlight = true;
     try {
       await _repository.updateLocation(
-          driverId: id, latitude: 15.3694, longitude: 44.1910);
-      Get.snackbar('الموقع', 'تم إرسال الموقع التجريبي');
-    } catch (exception) {
-      Get.snackbar('تعذر تحديث الموقع', exception.toString());
+        driverId: driverId,
+        latitude: position.latitude,
+        longitude: position.longitude,
+      );
+      _lastLocationSentAt = DateTime.now();
+      _lastSentPosition = position;
+      if (showMessage) {
+        Get.snackbar('تم تحديث الموقع', 'تم إرسال موقعك الحقيقي الحالي.');
+      }
+    } finally {
+      _locationUpdateInFlight = false;
     }
   }
 
@@ -154,13 +281,19 @@ class DriverController extends GetxController {
                 },
               ),
       ),
-      actions: [TextButton(onPressed: Get.back, child: const Text('إغلاق'))],
+      actions: [
+        TextButton(
+          onPressed: () => Get.back<void>(),
+          child: const Text('إغلاق'),
+        ),
+      ],
     ));
   }
 
   @override
   void onClose() {
     _ridesPollingTimer?.cancel();
+    _locationSubscription?.cancel();
     super.onClose();
   }
 }

@@ -29,10 +29,11 @@ class DriverHistoryView extends GetView<DriverController> {
                 final completed = '${ride['status']}' == '6';
                 return Card(
                   child: ListTile(
-                    leading: Icon(completed ? Icons.check_circle : Icons.cancel),
+                    leading:
+                        Icon(completed ? Icons.check_circle : Icons.cancel),
                     title: Text('رحلة #${ride['id']}'),
                     subtitle: Text(
-                      '${ride['pickupAddress'] ?? '-'} ← ${ride['destinationAddress'] ?? '-'}\n'
+                      '${ride['pickupDisplayName'] ?? ride['pickupAddress'] ?? '-'} ← ${ride['destinationDisplayName'] ?? ride['destinationAddress'] ?? '-'}\n'
                       '${ride['customerPrice'] ?? '-'} ر.ي',
                     ),
                     isThreeLine: true,

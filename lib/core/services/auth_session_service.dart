@@ -31,7 +31,8 @@ class AuthSessionService extends GetxService {
     final refreshToken = await _storage.refreshToken;
     isAuthenticated.value = (accessToken?.isNotEmpty ?? false) ||
         (refreshToken?.isNotEmpty ?? false);
-    currentUserId.value = _parseUserId(accessToken);
+    currentUserId.value =
+        await _storage.authenticatedUserId ?? _parseUserId(accessToken);
     return this;
   }
 
@@ -41,10 +42,19 @@ class AuthSessionService extends GetxService {
     required bool remember,
     int? userId,
   }) async {
-    await _storage.saveTokens(
-      accessToken: accessToken,
-      refreshToken: refreshToken,
-    );
+    if (remember) {
+      await _storage.saveTokens(
+        accessToken: accessToken,
+        refreshToken: refreshToken,
+      );
+      if (userId != null) await _storage.saveAuthenticatedUserId(userId);
+    } else {
+      await _storage.clear();
+      await _storage.holdTemporaryTokens(
+        accessToken: accessToken,
+        refreshToken: refreshToken,
+      );
+    }
     await _storage.setRememberMe(remember);
     rememberLogin.value = remember;
     isAuthenticated.value = true;
@@ -86,4 +96,3 @@ class AuthSessionService extends GetxService {
     Get.offAllNamed<void>('/home');
   }
 }
-

@@ -3,6 +3,7 @@ import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:get/get.dart';
 import '../core/services/locale_service.dart';
 import '../core/services/theme_service.dart';
+import '../core/services/auth_session_service.dart';
 import '../features/driver/driver_routes.dart';
 import 'bindings/initial_binding.dart';
 import 'localization/app_translations.dart';
@@ -56,7 +57,9 @@ class _ConfiguredApp extends StatelessWidget {
         title: 'يمن درايف للسائق',
         debugShowCheckedModeBanner: false,
         initialBinding: InitialBinding(),
-        initialRoute: DriverRoutes.login,
+        initialRoute: Get.find<AuthSessionService>().isAuthenticated.value
+            ? DriverRoutes.home
+            : DriverRoutes.login,
         getPages: AppPages.pages,
         translations: AppTranslations(),
         locale: localeService.locale.value,

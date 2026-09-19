@@ -8,9 +8,6 @@ class AppEnvironment {
   static String defaultCurrency = 'ر.ي';
   static bool useDemoData = true;
   static String googleMapsApiKey = '';
-  static String googleRoutesApiKey = '';
-  static String googleGeocodingApiKey = '';
-  static String googlePlacesApiKey = '';
   static String androidPackageName = 'com.example.yemen_drive';
   static String androidCertSha1 = '';
   static String signalRHubUrl = '';
@@ -25,9 +22,6 @@ class AppEnvironment {
     required String baseUrl,
     bool useDemoData = true,
     String googleMapsApiKey = '',
-    String googleRoutesApiKey = '',
-    String googleGeocodingApiKey = '',
-    String googlePlacesApiKey = '',
     String androidPackageName = 'com.example.yemen_drive',
     String androidCertSha1 = '',
     String signalRHubUrl = '',
@@ -38,13 +32,6 @@ class AppEnvironment {
         : baseUrl;
     AppEnvironment.useDemoData = useDemoData;
     AppEnvironment.googleMapsApiKey = googleMapsApiKey;
-    AppEnvironment.googleRoutesApiKey =
-        googleRoutesApiKey.isEmpty ? googleMapsApiKey : googleRoutesApiKey;
-    AppEnvironment.googleGeocodingApiKey = googleGeocodingApiKey.isEmpty
-        ? googleMapsApiKey
-        : googleGeocodingApiKey;
-    AppEnvironment.googlePlacesApiKey =
-        googlePlacesApiKey.isEmpty ? googleMapsApiKey : googlePlacesApiKey;
     AppEnvironment.androidPackageName = androidPackageName;
     AppEnvironment.androidCertSha1 = androidCertSha1.replaceAll(':', '');
     AppEnvironment.signalRHubUrl = signalRHubUrl.isEmpty
@@ -63,4 +50,3 @@ class AppEnvironment {
     return '$root/hubs/tracking';
   }
 }
-

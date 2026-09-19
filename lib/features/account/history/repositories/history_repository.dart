@@ -22,9 +22,10 @@ class ApiHistoryRepository implements HistoryRepository {
           item['amount'] ?? item['customerPrice'] ?? item['serverPrice'];
       return RideHistoryItem(
         id: '${item['id'] ?? ''}',
-        pickup: '${item['pickupAddress'] ?? item['pickup'] ?? ''}',
+        pickup:
+            '${item['pickupDisplayName'] ?? item['pickup'] ?? item['pickupAddress'] ?? ''}',
         destination:
-            '${item['destinationAddress'] ?? item['destination'] ?? ''}',
+            '${item['destinationDisplayName'] ?? item['destination'] ?? item['destinationAddress'] ?? ''}',
         date: DateTime.tryParse(
                 '${item['createdAtUtc'] ?? item['date'] ?? ''}') ??
             DateTime.now(),
@@ -47,4 +48,3 @@ class ApiHistoryRepository implements HistoryRepository {
     return RideHistoryStatus.upcoming;
   }
 }
-

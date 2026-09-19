@@ -14,8 +14,11 @@ class DriverLoginController extends GetxController {
   final passwordController = TextEditingController();
   final otpController = TextEditingController();
   final isLoading = false.obs;
+  final rememberMe = false.obs;
   final RxnString challengeId = RxnString();
   final RxnString error = RxnString();
+
+  void toggleRememberMe(bool? value) => rememberMe.value = value ?? false;
 
   Future<void> submit() async {
     if (isLoading.value) return;
@@ -49,7 +52,7 @@ class DriverLoginController extends GetxController {
     await _session.activate(
         accessToken: access,
         refreshToken: result.refreshToken ?? '',
-        remember: true,
+        remember: rememberMe.value,
         userId: result.userId);
     Get.offAllNamed<void>(DriverRoutes.home);
   }

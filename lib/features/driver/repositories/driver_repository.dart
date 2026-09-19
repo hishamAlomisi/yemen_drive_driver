@@ -15,7 +15,9 @@ abstract interface class DriverRepository {
       {required int driverId,
       required double latitude,
       required double longitude});
-  Future<Map<String, Object?>> registerCashPayment({required int rideId, required num cashReceived});
+  Future<Map<String, Object?>> registerCashPayment(
+      {required int rideId, required num cashReceived});
+  Future<Map<String, Object?>> getCashCollectionApproval(int approvalId);
   Future<List<Map<String, Object?>>> notifications();
 }
 
@@ -86,11 +88,19 @@ class ApiDriverRepository implements DriverRepository {
       });
 
   @override
-  Future<Map<String, Object?>> registerCashPayment({required int rideId, required num cashReceived}) =>
+  Future<Map<String, Object?>> registerCashPayment(
+          {required int rideId, required num cashReceived}) =>
       _provider.executeData('DriverCashPaymentModel', 'add', <String, Object?>{
         'rideId': rideId,
         'cashReceived': cashReceived,
         'currency': 'YER',
+      });
+
+  @override
+  Future<Map<String, Object?>> getCashCollectionApproval(int approvalId) =>
+      _provider
+          .executeData('CashCollectionApprovalModel', 'get', <String, Object?>{
+        'id': approvalId,
       });
 
   @override

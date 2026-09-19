@@ -126,7 +126,7 @@ class ApiClient extends GetxService {
       final access = data?['accessToken']?.toString();
       final refresh = data?['refreshToken']?.toString();
       if (access == null || refresh == null) return false;
-      await _storage.saveTokens(accessToken: access, refreshToken: refresh);
+      await _storage.replaceTokens(accessToken: access, refreshToken: refresh);
       return true;
     } catch (_) {
       await _storage.clear();
@@ -151,4 +151,3 @@ class ApiClient extends GetxService {
     );
   }
 }
-

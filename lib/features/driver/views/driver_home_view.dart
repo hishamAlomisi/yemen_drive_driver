@@ -118,7 +118,12 @@ class DriverHomeView extends GetView<DriverController> {
                     Chip(label: Text(labels[state] ?? 'غير معروف'))
                   ]),
                   Text(
-                      '${ride['pickupAddress'] ?? '-'}  ←  ${ride['destinationAddress'] ?? '-'}'),
+                      '${ride['pickupDisplayName'] ?? ride['pickupAddress'] ?? '-'}  ←  ${ride['destinationDisplayName'] ?? ride['destinationAddress'] ?? '-'}'),
+                  if (ride['pickupDistanceMeters'] != null) ...[
+                    const SizedBox(height: 4),
+                    Text(
+                        'يبعد عنك ${_distanceText(ride['pickupDistanceMeters'])}'),
+                  ],
                   const SizedBox(height: 5),
                   Text('السعر: ${ride['customerPrice'] ?? '-'} ر.ي'),
                   if (ride['driverOfferAmount'] != null) ...[
@@ -141,12 +146,25 @@ class DriverHomeView extends GetView<DriverController> {
                         label: Text(ride['driverOfferAmount'] != null
                             ? 'تعديل العرض'
                             : 'إرسال عرض')),
+                  if (!assigned && ride['pickupLatitude'] != null)
+                    OutlinedButton.icon(
+                      onPressed: () => controller.openPickupNavigation(ride),
+                      icon: const Icon(Icons.navigation_outlined),
+                      label: const Text('فتح مسار إلى نقطة الانطلاق'),
+                    ),
                   if (assigned && state == 3)
                     FilledButton.icon(
                         onPressed: () =>
                             controller.updateStatus(ride, 4, 'في الطريق'),
                         icon: const Icon(Icons.directions_car),
                         label: const Text('بدء التوجه')),
+                  if (assigned && ride['destinationAvailable'] == true)
+                    OutlinedButton.icon(
+                      onPressed: () =>
+                          controller.openDestinationNavigation(ride),
+                      icon: const Icon(Icons.route_outlined),
+                      label: const Text('فتح مسار الوجهة'),
+                    ),
                   if (assigned && state == 4)
                     FilledButton.icon(
                         onPressed: () =>
@@ -184,6 +202,13 @@ class DriverHomeView extends GetView<DriverController> {
                       label: const Text('اتصال بالعميل'),
                     )
                 ])));
+  }
+
+  String _distanceText(Object? value) {
+    final meters = double.tryParse('$value');
+    if (meters == null) return '-';
+    if (meters < 1000) return '${meters.round()} م';
+    return '${(meters / 1000).toStringAsFixed(1)} كم';
   }
 
   Future<void> _callCustomer(Object? phone) async {

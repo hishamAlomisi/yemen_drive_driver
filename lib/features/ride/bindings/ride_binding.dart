@@ -51,11 +51,12 @@ class RideBinding extends Bindings {
     }
     if (!Get.isRegistered<LocationController>()) {
       if (!Get.isRegistered<RouteRepository>()) {
-        Get.put<RouteRepository>(GoogleRoutesRepository(), permanent: true);
+        Get.put<RouteRepository>(ApiRoutesRepository(Get.find<ApiClient>()),
+            permanent: true);
       }
       if (!Get.isRegistered<LocationSearchRepository>()) {
         Get.put<LocationSearchRepository>(
-          GoogleLocationSearchRepository(),
+          ApiLocationSearchRepository(Get.find<ApiClient>()),
           permanent: true,
         );
       }
@@ -76,4 +77,3 @@ class RideBinding extends Bindings {
     Get.lazyPut<PaymentController>(PaymentController.new, fenix: true);
   }
 }
-
