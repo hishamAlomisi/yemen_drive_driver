@@ -18,6 +18,13 @@ abstract interface class DriverRepository {
   Future<Map<String, Object?>> registerCashPayment(
       {required int rideId, required num cashReceived});
   Future<Map<String, Object?>> getCashCollectionApproval(int approvalId);
+  Future<Map<String, Object?>> getWallet();
+  Future<void> decideCashPaymentRequest({required int requestId, required bool accept});
+  Future<void> decideRideCancellation({
+    required int requestId,
+    required String operation,
+    String? note,
+  });
   Future<List<Map<String, Object?>>> notifications();
 }
 
@@ -102,6 +109,26 @@ class ApiDriverRepository implements DriverRepository {
           .executeData('CashCollectionApprovalModel', 'get', <String, Object?>{
         'id': approvalId,
       });
+
+  @override
+  Future<Map<String, Object?>> getWallet() =>
+      _provider.executeData('WalletModel', 'get', <String, Object?>{});
+
+  @override
+  Future<void> decideCashPaymentRequest({required int requestId, required bool accept}) =>
+      _provider.execute('CashPaymentRequestModel', accept ? 'accept' : 'reject', <String, Object?>{'id': requestId});
+
+  @override
+  Future<void> decideRideCancellation({
+    required int requestId,
+    required String operation,
+    String? note,
+  }) =>
+      _provider.execute(
+        'RideCancellationRequestModel',
+        operation,
+        <String, Object?>{'id': requestId, if (note != null) 'note': note},
+      );
 
   @override
   Future<List<Map<String, Object?>>> notifications() =>

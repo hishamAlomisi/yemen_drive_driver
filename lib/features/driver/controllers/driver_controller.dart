@@ -1,9 +1,9 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:get/get.dart';
-import 'package:url_launcher/url_launcher.dart';
 
 import '../../../core/services/auth_session_service.dart';
 import '../repositories/driver_repository.dart';
@@ -19,6 +19,10 @@ class DriverController extends GetxController {
   final Rxn<Map<String, Object?>> profile = Rxn<Map<String, Object?>>();
   final rides = <Map<String, Object?>>[].obs;
   final notifications = <Map<String, Object?>>[].obs;
+  final RxDouble walletBalance = 0.0.obs;
+  final walletTransactions = <Map<String, Object?>>[].obs;
+  final isWalletLoading = false.obs;
+  final isWalletLoaded = false.obs;
   Timer? _ridesPollingTimer;
   StreamSubscription<Position>? _locationSubscription;
   bool _refreshInFlight = false;
@@ -119,33 +123,52 @@ class DriverController extends GetxController {
     await load(showLoading: false);
   }
 
+  Future<void> loadWallet() async {
+    if (isWalletLoading.value) return;
+    isWalletLoading.value = true;
+    try {
+      final wallet = await _repository.getWallet();
+      walletBalance.value = _number(wallet['balance']);
+      final items = wallet['transactions'];
+      walletTransactions.assignAll(items is List
+          ? items.whereType<Map>().map((item) => Map<String, Object?>.from(item)).toList()
+          : const <Map<String, Object?>>[]);
+      isWalletLoaded.value = true;
+    } catch (_) {
+      Get.snackbar('تعذر تحميل المحفظة', 'تحقق من الاتصال ثم أعد المحاولة.');
+    } finally {
+      isWalletLoading.value = false;
+    }
+  }
+
+  double _number(Object? value) =>
+      value is num ? value.toDouble() : double.tryParse('${value ?? ''}') ?? 0;
+
   Future<void> openPickupNavigation(Map<String, Object?> ride) =>
-      _openNavigation(ride['pickupLatitude'], ride['pickupLongitude']);
+      _openNavigation(ride, ride['pickupLatitude'], ride['pickupLongitude'], 'نقطة انطلاق العميل');
 
   Future<void> openDestinationNavigation(Map<String, Object?> ride) async {
     if (ride['destinationAvailable'] != true) {
       Get.snackbar('الوجهة محمية', 'تظهر إحداثيات الوجهة بعد قبول العرض فقط.');
       return;
     }
-    await _openNavigation(
-        ride['destinationLatitude'], ride['destinationLongitude']);
+    await _openNavigation(ride, ride['destinationLatitude'], ride['destinationLongitude'], 'وجهة الرحلة');
   }
 
-  Future<void> _openNavigation(Object? latitude, Object? longitude) async {
+  Future<void> _openNavigation(Map<String, Object?> ride, Object? latitude, Object? longitude, String title) async {
     final lat = double.tryParse('$latitude');
     final lng = double.tryParse('$longitude');
     if (lat == null || lng == null) {
       Get.snackbar('المسار غير متاح', 'لا توجد إحداثيات صالحة لفتح المسار.');
       return;
     }
-    final uri = Uri.https('www.google.com', '/maps/dir/', <String, String>{
-      'api': '1',
-      'destination': '$lat,$lng',
-      'travelmode': 'driving',
+    await Get.toNamed<void>(DriverRoutes.navigation, arguments: <String, Object?>{
+      'originLatitude': _number(ride['driverLatitude']),
+      'originLongitude': _number(ride['driverLongitude']),
+      'destinationLatitude': lat,
+      'destinationLongitude': lng,
+      'title': title,
     });
-    if (!await launchUrl(uri, mode: LaunchMode.externalApplication)) {
-      Get.snackbar('تعذر فتح الخريطة', 'لم يتمكن الجهاز من فتح تطبيق الخرائط.');
-    }
   }
 
   Future<void> updateLocation() async {
@@ -259,6 +282,79 @@ class DriverController extends GetxController {
   int get unreadNotifications =>
       notifications.where((item) => item['isRead'] != true).length;
 
+  int? cancellationRequestId(Map<String, Object?> notification) {
+    final raw = notification['dataJson']?.toString();
+    if (raw == null || raw.isEmpty) return null;
+    try {
+      final value = jsonDecode(raw);
+      if (value is Map) return int.tryParse('${value['cancellationRequestId']}');
+    } catch (_) {
+      // A normal notification may not carry structured data.
+    }
+    return null;
+  }
+
+  int? cashPaymentRequestId(Map<String, Object?> notification) {
+    final raw = notification['dataJson']?.toString();
+    if (raw == null || raw.isEmpty) return null;
+    try {
+      final value = jsonDecode(raw);
+      if (value is Map) return int.tryParse('${value['cashPaymentRequestId']}');
+    } catch (_) {
+      // A normal notification may not carry structured data.
+    }
+    return null;
+  }
+
+  int? notificationRideId(Map<String, Object?> notification) {
+    final raw = notification['dataJson']?.toString();
+    if (raw == null || raw.isEmpty) return null;
+    try {
+      final value = jsonDecode(raw);
+      if (value is Map) return int.tryParse('${value['rideId']}');
+    } catch (_) {}
+    return null;
+  }
+
+  Future<void> decideCashPaymentRequest(int requestId, bool accept, [int? rideId]) async {
+    if (Get.isDialogOpen ?? false) Get.back<void>();
+    try {
+      await _repository.decideCashPaymentRequest(requestId: requestId, accept: accept);
+      Get.snackbar(
+        accept ? 'تم تأكيد الدفع النقدي' : 'تم رفض الدفع النقدي',
+        accept
+            ? 'افتح الرحلة وسجل التحصيل النقدي لإتمام الدفع.'
+            : 'أُبلغ العميل بأن النقد لم يُستلم.',
+      );
+      await load(showLoading: false);
+      if (accept && rideId != null) {
+        final ride = rides.where((item) => '${item['id']}' == '$rideId').firstOrNull;
+        if (ride != null) await openCashPayment(ride);
+      }
+    } catch (_) {
+      Get.snackbar('تعذر تسجيل القرار', 'تحقق من حالة طلب الدفع ثم حاول مرة أخرى.');
+    }
+  }
+
+  Future<void> decideCancellation(int requestId, String operation) async {
+    if (Get.isDialogOpen ?? false) Get.back<void>();
+    try {
+      await _repository.decideRideCancellation(
+        requestId: requestId,
+        operation: operation,
+      );
+      final message = switch (operation) {
+        'accept' => 'تم قبول طلب الإلغاء وإحالته للإدارة للمراجعة.',
+        'refer' => 'أُحيل الطلب إلى الإدارة للمراجعة.',
+        _ => 'تم رفض طلب الإلغاء وأُبلغ العميل.',
+      };
+      Get.snackbar('تم تسجيل القرار', message);
+      await load(showLoading: false);
+    } catch (_) {
+      Get.snackbar('تعذر تسجيل القرار', 'تحقق من حالة الطلب ثم حاول مرة أخرى.');
+    }
+  }
+
   void showNotifications() {
     Get.dialog<void>(AlertDialog(
       title: Text('الإشعارات ($unreadNotifications)'),
@@ -271,12 +367,25 @@ class DriverController extends GetxController {
                 itemCount: notifications.length,
                 itemBuilder: (_, index) {
                   final item = notifications[index];
+                  final cancellationId = cancellationRequestId(item);
+                  final cashPaymentId = cashPaymentRequestId(item);
+                  final rideId = notificationRideId(item);
                   return ListTile(
                     leading: Icon(item['isRead'] == true
                         ? Icons.notifications_none
                         : Icons.notifications_active),
                     title: Text('${item['title'] ?? ''}'),
                     subtitle: Text('${item['body'] ?? ''}'),
+                    trailing: cancellationId != null
+                        ? const Icon(Icons.gavel_outlined)
+                        : cashPaymentId != null
+                            ? const Icon(Icons.payments_outlined)
+                            : null,
+                    onTap: cancellationId != null
+                        ? () => _showCancellationDecision(cancellationId)
+                        : cashPaymentId != null
+                            ? () => _showCashPaymentDecision(cashPaymentId, rideId)
+                            : null,
                   );
                 },
               ),
@@ -288,6 +397,37 @@ class DriverController extends GetxController {
         ),
       ],
     ));
+  }
+
+  void _showCashPaymentDecision(int requestId, int? rideId) {
+    if (Get.isDialogOpen ?? false) Get.back<void>();
+    Get.dialog<void>(
+      AlertDialog(
+        title: const Text('تأكيد دفع نقدي'),
+        content: const Text('هل استلمت المبلغ النقدي من العميل؟ عند التأكيد افتح الرحلة وسجل التحصيل بالمبلغ الفعلي.'),
+        actions: <Widget>[
+          TextButton(onPressed: () => decideCashPaymentRequest(requestId, false, rideId), child: const Text('لم أستلم المبلغ')),
+          FilledButton(onPressed: () => decideCashPaymentRequest(requestId, true, rideId), child: const Text('نعم، استلمته')),
+        ],
+      ),
+      barrierDismissible: false,
+    );
+  }
+
+  void _showCancellationDecision(int requestId) {
+    if (Get.isDialogOpen ?? false) Get.back<void>();
+    Get.dialog<void>(
+      AlertDialog(
+        title: const Text('طلب إلغاء الرحلة'),
+        content: const Text('اختر القرار المناسب. القبول أو الإحالة ينقلان الطلب إلى الإدارة؛ الرفض وحده يسمح للعميل بإعادة الطلب.'),
+        actions: <Widget>[
+          TextButton(onPressed: () => decideCancellation(requestId, 'reject'), child: const Text('رفض')),
+          OutlinedButton(onPressed: () => decideCancellation(requestId, 'refer'), child: const Text('رفض وإحالة للإدارة')),
+          FilledButton(onPressed: () => decideCancellation(requestId, 'accept'), child: const Text('قبول')),
+        ],
+      ),
+      barrierDismissible: false,
+    );
   }
 
   @override

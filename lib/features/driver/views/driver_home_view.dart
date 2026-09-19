@@ -24,6 +24,9 @@ class DriverHomeView extends GetView<DriverController> {
             onPressed: () => Get.toNamed<void>(DriverRoutes.history),
             icon: const Icon(Icons.history)),
         IconButton(
+            onPressed: () => Get.toNamed<void>(DriverRoutes.wallet),
+            icon: const Icon(Icons.account_balance_wallet_outlined)),
+        IconButton(
             onPressed: controller.signOut, icon: const Icon(Icons.logout))
       ]),
       body: Obx(() => controller.isLoading.value && controller.rides.isEmpty
@@ -177,6 +180,11 @@ class DriverHomeView extends GetView<DriverController> {
                         icon: const Icon(Icons.payments_outlined),
                         label: const Text('تحصيل الدفع')),
                     const SizedBox(height: 8),
+                    FilledButton.icon(
+                        onPressed: () => controller.updateStatus(ride, 6, 'مكتملة'),
+                        icon: const Icon(Icons.flag_rounded),
+                        label: const Text('إنهاء الرحلة')),
+                    const SizedBox(height: 8),
                     OutlinedButton.icon(
                         onPressed: () => Get.to<void>(
                             () => DriverChatView(rideId: '${ride['id']}')),
@@ -189,6 +197,12 @@ class DriverHomeView extends GetView<DriverController> {
                       label: const Text('اتصال بالعميل'),
                     )
                   ],
+                  if (assigned && state == 6 && ride['cashPaymentRequestStatus'] == 1)
+                    OutlinedButton.icon(
+                      onPressed: () => controller.openCashPayment(ride),
+                      icon: const Icon(Icons.payments_outlined),
+                      label: const Text('تسجيل تحصيل نقدي بطلب العميل'),
+                    ),
                   if (assigned && state == 4)
                     OutlinedButton.icon(
                         onPressed: () => Get.to<void>(
