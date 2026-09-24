@@ -104,7 +104,8 @@ class DriverHomeView extends GetView<DriverController> {
       4: 'في الطريق',
       5: 'بدأت',
       6: 'مكتملة',
-      7: 'ملغاة'
+      7: 'ملغاة',
+      8: 'طلب إلغاء قيد المراجعة',
     };
     return Card(
         margin: const EdgeInsets.only(bottom: 10),
@@ -176,9 +177,14 @@ class DriverHomeView extends GetView<DriverController> {
                         label: const Text('بدء الرحلة')),
                   if (assigned && state == 5) ...[
                     FilledButton.icon(
-                        onPressed: () => controller.openCashPayment(ride),
+                        onPressed: ride['paymentCompleted'] == true ? null : () => controller.openCashPayment(ride),
                         icon: const Icon(Icons.payments_outlined),
                         label: const Text('تحصيل الدفع')),
+                    const SizedBox(height: 8),
+                    FilledButton.icon(
+                        onPressed: ride['paymentCompleted'] == true ? null : () => controller.enableCustomerPayment(ride),
+                        icon: const Icon(Icons.credit_score_outlined),
+                        label: const Text('تمكين طرق الدفع للعميل')),
                     const SizedBox(height: 8),
                     FilledButton.icon(
                         onPressed: () => controller.updateStatus(ride, 6, 'مكتملة'),

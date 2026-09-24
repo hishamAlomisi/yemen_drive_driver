@@ -98,7 +98,7 @@ class _DriverPaymentViewState extends State<DriverPaymentView> {
           return;
         }
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('تم تسجيل الدفع وإكمال الرحلة.')),
+          const SnackBar(content: Text('تم تسجيل التحصيل النقدي. اضغط «إنهاء الرحلة» بعد التحقق من اكتمال العملية.')),
         );
         Navigator.of(context).pop();
       }
@@ -229,7 +229,7 @@ class _DriverPaymentViewState extends State<DriverPaymentView> {
                   : const Icon(Icons.payments_outlined),
               label: Text(_approvalStatus == 1
                   ? 'إعادة تسجيل التحصيل بعد الموافقة'
-                  : 'تسجيل الدفع وإنهاء الرحلة'),
+                  : 'تسجيل التحصيل فقط'),
             ),
             const SizedBox(height: 12),
             const Text(

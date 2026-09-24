@@ -10,7 +10,7 @@ abstract interface class DriverRepository {
   Future<DriverSnapshot> load(int? userId);
   Future<void> sendOffer(
       {required int rideId, required int driverId, required num amount});
-  Future<void> updateRideStatus({required int rideId, required int status});
+  Future<void> updateRideStatus({required int rideId, required int status, bool? customerPaymentEnabled});
   Future<void> updateLocation(
       {required int driverId,
       required double latitude,
@@ -19,6 +19,7 @@ abstract interface class DriverRepository {
       {required int rideId, required num cashReceived});
   Future<Map<String, Object?>> getCashCollectionApproval(int approvalId);
   Future<Map<String, Object?>> getWallet();
+  Future<Map<String, Object?>> getFinancialReport(Map<String, Object?> filters);
   Future<void> decideCashPaymentRequest({required int requestId, required bool accept});
   Future<void> decideRideCancellation({
     required int requestId,
@@ -78,9 +79,9 @@ class ApiDriverRepository implements DriverRepository {
       });
 
   @override
-  Future<void> updateRideStatus({required int rideId, required int status}) =>
+  Future<void> updateRideStatus({required int rideId, required int status, bool? customerPaymentEnabled}) =>
       _provider.execute('RideModel', 'update',
-          <String, Object?>{'id': rideId, 'status': status});
+          <String, Object?>{'id': rideId, 'status': status, if (customerPaymentEnabled != null) 'customerPaymentEnabled': customerPaymentEnabled});
 
   @override
   Future<void> updateLocation(
@@ -113,6 +114,10 @@ class ApiDriverRepository implements DriverRepository {
   @override
   Future<Map<String, Object?>> getWallet() =>
       _provider.executeData('WalletModel', 'get', <String, Object?>{});
+
+  @override
+  Future<Map<String, Object?>> getFinancialReport(Map<String, Object?> filters) =>
+      _provider.financialReport(filters);
 
   @override
   Future<void> decideCashPaymentRequest({required int requestId, required bool accept}) =>

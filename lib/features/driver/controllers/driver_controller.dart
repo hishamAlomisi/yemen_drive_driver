@@ -6,6 +6,7 @@ import 'package:geolocator/geolocator.dart';
 import 'package:get/get.dart';
 
 import '../../../core/services/auth_session_service.dart';
+import '../../../core/network/api_models.dart';
 import '../repositories/driver_repository.dart';
 import '../driver_routes.dart';
 import '../views/driver_payment_view.dart';
@@ -23,7 +24,18 @@ class DriverController extends GetxController {
   final walletTransactions = <Map<String, Object?>>[].obs;
   final isWalletLoading = false.obs;
   final isWalletLoaded = false.obs;
+  final RxDouble driverAccountBalance = 0.0.obs;
+  final RxDouble driverCommissionTotal = 0.0.obs;
+  final driverAccountTransactions = <Map<String, Object?>>[].obs;
+  final isDriverAccountLoading = false.obs;
+  final Rx<DateTime> financialFrom = DateTime.now().obs;
+  final Rx<DateTime> financialTo = DateTime.now().obs;
+  final RxString financialSearch = ''.obs;
+  final RxnInt financialType = RxnInt();
+  final RxBool financialFiltersVisible = false.obs;
   Timer? _ridesPollingTimer;
+  Timer? _paymentPollingTimer;
+  final paymentEnabledRideIds = <int>{};
   StreamSubscription<Position>? _locationSubscription;
   bool _refreshInFlight = false;
   bool _locationUpdateInFlight = false;
@@ -42,6 +54,8 @@ class DriverController extends GetxController {
   Future<void> _startRidesPolling() async {
     await load();
     _ridesPollingTimer?.cancel();
+    _paymentPollingTimer?.cancel();
+    _paymentPollingTimer = null;
     _ridesPollingTimer = Timer.periodic(const Duration(seconds: 5), (_) {
       unawaited(load(showLoading: false));
     });
@@ -58,6 +72,7 @@ class DriverController extends GetxController {
       final snapshot = await _repository.load(_session.currentUserId.value);
       profile.value = snapshot.profile;
       rides.assignAll(snapshot.rides);
+      paymentEnabledRideIds.removeWhere((id) => snapshot.rides.any((r) => '${r['id']}' == '$id' && r['paymentCompleted'] == true));
       notifications.assignAll(await _repository.notifications());
     } catch (exception) {
       // A transient polling failure must not hide the last usable snapshot.
@@ -109,7 +124,42 @@ class DriverController extends GetxController {
       Get.snackbar('تم التحديث', 'أصبحت الحالة: $label');
       await load();
     } catch (exception) {
-      Get.snackbar('تعذر التحديث', exception.toString());
+      final message = exception is ApiProblemDetails
+          ? (exception.detail?.trim().isNotEmpty == true
+              ? exception.detail!
+              : exception.title)
+          : exception.toString();
+      Get.snackbar('تعذر التحديث', message);
+    }
+  }
+
+  Future<void> enableCustomerPayment(Map<String, Object?> ride) async {
+    final id = int.tryParse('${ride['id']}');
+    if (id == null || ride['paymentCompleted'] == true) return;
+    try {
+      await _repository.updateRideStatus(rideId: id, status: int.tryParse('${ride['status']}') ?? 5, customerPaymentEnabled: true);
+      paymentEnabledRideIds.add(id);
+      _paymentPollingTimer ??= Timer.periodic(const Duration(seconds: 5), (_) => _pollEnabledPayments());
+      Get.snackbar('تمكين الدفع', 'أصبح بإمكان العميل إتمام الدفع الآن.');
+      await load(showLoading: false);
+    } catch (exception) {
+      Get.snackbar('تعذر تمكين الدفع', exception.toString());
+    }
+  }
+
+  Future<void> _pollEnabledPayments() async {
+    if (paymentEnabledRideIds.isEmpty) {
+      _paymentPollingTimer?.cancel();
+      _paymentPollingTimer = null;
+      return;
+    }
+    await load(showLoading: false);
+    final completed = paymentEnabledRideIds.where((id) => rides.any((r) => '${r['id']}' == '$id' && r['paymentCompleted'] == true)).toList();
+    paymentEnabledRideIds.removeAll(completed);
+    if (paymentEnabledRideIds.isEmpty) {
+      _paymentPollingTimer?.cancel();
+      _paymentPollingTimer = null;
+      Get.snackbar('تم الدفع', 'تم تأكيد تحصيل مبلغ الرحلة.');
     }
   }
 
@@ -131,7 +181,10 @@ class DriverController extends GetxController {
       walletBalance.value = _number(wallet['balance']);
       final items = wallet['transactions'];
       walletTransactions.assignAll(items is List
-          ? items.whereType<Map>().map((item) => Map<String, Object?>.from(item)).toList()
+          ? items
+              .whereType<Map>()
+              .map((item) => Map<String, Object?>.from(item))
+              .toList()
           : const <Map<String, Object?>>[]);
       isWalletLoaded.value = true;
     } catch (_) {
@@ -141,34 +194,75 @@ class DriverController extends GetxController {
     }
   }
 
+  Future<void> loadDriverAccount() async {
+    if (isDriverAccountLoading.value) return;
+    isDriverAccountLoading.value = true;
+    try {
+      final from = financialFrom.value;
+      final to = financialTo.value;
+      final report = await _repository.getFinancialReport(<String, Object?>{
+        'from': DateTime(from.year, from.month, from.day).toUtc().toIso8601String(),
+        'to': DateTime(to.year, to.month, to.day).toUtc().toIso8601String(),
+        if (financialSearch.value.trim().isNotEmpty) 'query': financialSearch.value.trim(),
+        if (financialType.value != null) 'entryType': financialType.value,
+      });
+      driverAccountBalance.value = _number(report['balance']);
+      driverCommissionTotal.value = _number(report['totalCommission']);
+      final items = report['transactions'];
+      driverAccountTransactions.assignAll(items is List
+          ? items.whereType<Map>().map((item) => Map<String, Object?>.from(item)).toList()
+          : const <Map<String, Object?>>[]);
+    } catch (exception) {
+      Get.snackbar('تعذر تحميل حساب السائق', 'تحقق من الاتصال ثم أعد المحاولة.');
+    } finally {
+      isDriverAccountLoading.value = false;
+    }
+  }
+
+  void setFinancialDateRange(DateTime from, DateTime to) {
+    financialFrom.value = DateTime(from.year, from.month, from.day);
+    financialTo.value = DateTime(to.year, to.month, to.day);
+    unawaited(loadDriverAccount());
+  }
+
+  void setFinancialFilters({String? query, int? type}) {
+    if (query != null) financialSearch.value = query;
+    financialType.value = type;
+    unawaited(loadDriverAccount());
+  }
+
   double _number(Object? value) =>
       value is num ? value.toDouble() : double.tryParse('${value ?? ''}') ?? 0;
 
   Future<void> openPickupNavigation(Map<String, Object?> ride) =>
-      _openNavigation(ride, ride['pickupLatitude'], ride['pickupLongitude'], 'نقطة انطلاق العميل');
+      _openNavigation(ride, ride['pickupLatitude'], ride['pickupLongitude'],
+          'نقطة انطلاق العميل');
 
   Future<void> openDestinationNavigation(Map<String, Object?> ride) async {
     if (ride['destinationAvailable'] != true) {
       Get.snackbar('الوجهة محمية', 'تظهر إحداثيات الوجهة بعد قبول العرض فقط.');
       return;
     }
-    await _openNavigation(ride, ride['destinationLatitude'], ride['destinationLongitude'], 'وجهة الرحلة');
+    await _openNavigation(ride, ride['destinationLatitude'],
+        ride['destinationLongitude'], 'وجهة الرحلة');
   }
 
-  Future<void> _openNavigation(Map<String, Object?> ride, Object? latitude, Object? longitude, String title) async {
+  Future<void> _openNavigation(Map<String, Object?> ride, Object? latitude,
+      Object? longitude, String title) async {
     final lat = double.tryParse('$latitude');
     final lng = double.tryParse('$longitude');
     if (lat == null || lng == null) {
       Get.snackbar('المسار غير متاح', 'لا توجد إحداثيات صالحة لفتح المسار.');
       return;
     }
-    await Get.toNamed<void>(DriverRoutes.navigation, arguments: <String, Object?>{
-      'originLatitude': _number(ride['driverLatitude']),
-      'originLongitude': _number(ride['driverLongitude']),
-      'destinationLatitude': lat,
-      'destinationLongitude': lng,
-      'title': title,
-    });
+    await Get.toNamed<void>(DriverRoutes.navigation,
+        arguments: <String, Object?>{
+          'originLatitude': _number(ride['driverLatitude']),
+          'originLongitude': _number(ride['driverLongitude']),
+          'destinationLatitude': lat,
+          'destinationLongitude': lng,
+          'title': title,
+        });
   }
 
   Future<void> updateLocation() async {
@@ -287,7 +381,8 @@ class DriverController extends GetxController {
     if (raw == null || raw.isEmpty) return null;
     try {
       final value = jsonDecode(raw);
-      if (value is Map) return int.tryParse('${value['cancellationRequestId']}');
+      if (value is Map)
+        return int.tryParse('${value['cancellationRequestId']}');
     } catch (_) {
       // A normal notification may not carry structured data.
     }
@@ -316,10 +411,35 @@ class DriverController extends GetxController {
     return null;
   }
 
-  Future<void> decideCashPaymentRequest(int requestId, bool accept, [int? rideId]) async {
+  bool _cashNotificationActionable(
+      Map<String, Object?> notification, int? rideId) {
+    if (notification['isRead'] == true) return false;
+    if (rideId == null) return true;
+    final ride = rides.where((item) => '${item['id']}' == '$rideId').firstOrNull;
+    if (ride == null) return true;
+    final status = int.tryParse('${ride['status']}');
+    return status != 6 && status != 7 &&
+        ride['paymentCompleted'] != true &&
+        int.tryParse('${ride['cashPaymentRequestStatus']}') != 3;
+  }
+
+  Future<void> decideCashPaymentRequest(int requestId, bool accept,
+      [int? rideId]) async {
     if (Get.isDialogOpen ?? false) Get.back<void>();
     try {
-      await _repository.decideCashPaymentRequest(requestId: requestId, accept: accept);
+      await _repository.decideCashPaymentRequest(
+          requestId: requestId, accept: accept);
+      // The decision is consumed once. Mark the source notification read so
+      // it cannot reopen the same dialog or remain in the unread badge.
+      final notificationIndex = notifications.indexWhere(
+        (item) => cashPaymentRequestId(item) == requestId,
+      );
+      if (notificationIndex >= 0) {
+        notifications[notificationIndex] = <String, Object?>{
+          ...notifications[notificationIndex],
+          'isRead': true,
+        };
+      }
       Get.snackbar(
         accept ? 'تم تأكيد الدفع النقدي' : 'تم رفض الدفع النقدي',
         accept
@@ -328,11 +448,13 @@ class DriverController extends GetxController {
       );
       await load(showLoading: false);
       if (accept && rideId != null) {
-        final ride = rides.where((item) => '${item['id']}' == '$rideId').firstOrNull;
+        final ride =
+            rides.where((item) => '${item['id']}' == '$rideId').firstOrNull;
         if (ride != null) await openCashPayment(ride);
       }
     } catch (_) {
-      Get.snackbar('تعذر تسجيل القرار', 'تحقق من حالة طلب الدفع ثم حاول مرة أخرى.');
+      Get.snackbar(
+          'تعذر تسجيل القرار', 'تحقق من حالة طلب الدفع ثم حاول مرة أخرى.');
     }
   }
 
@@ -343,8 +465,17 @@ class DriverController extends GetxController {
         requestId: requestId,
         operation: operation,
       );
+      final notificationIndex = notifications.indexWhere(
+        (item) => cancellationRequestId(item) == requestId,
+      );
+      if (notificationIndex >= 0) {
+        notifications[notificationIndex] = <String, Object?>{
+          ...notifications[notificationIndex],
+          'isRead': true,
+        };
+      }
       final message = switch (operation) {
-        'accept' => 'تم قبول طلب الإلغاء وإحالته للإدارة للمراجعة.',
+        'accept' => 'تم تسجيل موافقتك على إلغاء الرحلة.',
         'refer' => 'أُحيل الطلب إلى الإدارة للمراجعة.',
         _ => 'تم رفض طلب الإلغاء وأُبلغ العميل.',
       };
@@ -370,21 +501,33 @@ class DriverController extends GetxController {
                   final cancellationId = cancellationRequestId(item);
                   final cashPaymentId = cashPaymentRequestId(item);
                   final rideId = notificationRideId(item);
+                  final cashActionable =
+                      cashPaymentId != null &&
+                      _cashNotificationActionable(item, rideId);
+                  final cancellationActionable =
+                      cancellationId != null &&
+                      item['isRead'] != true &&
+                      _cancellationNotificationActionable(rideId);
                   return ListTile(
-                    leading: Icon(item['isRead'] == true
-                        ? Icons.notifications_none
-                        : Icons.notifications_active),
+                    leading: Icon(
+                      item['isRead'] == true ||
+                              (cashPaymentId != null && !cashActionable)
+                          ? Icons.notifications_none
+                          : Icons.notifications_active,
+                    ),
                     title: Text('${item['title'] ?? ''}'),
                     subtitle: Text('${item['body'] ?? ''}'),
                     trailing: cancellationId != null
                         ? const Icon(Icons.gavel_outlined)
                         : cashPaymentId != null
-                            ? const Icon(Icons.payments_outlined)
+                            ? Icon(Icons.payments_outlined,
+                                color: cashActionable ? null : Colors.grey)
                             : null,
-                    onTap: cancellationId != null
+                    onTap: cancellationActionable
                         ? () => _showCancellationDecision(cancellationId)
-                        : cashPaymentId != null
-                            ? () => _showCashPaymentDecision(cashPaymentId, rideId)
+                        : cashActionable
+                            ? () =>
+                                _showCashPaymentDecision(cashPaymentId!, rideId)
                             : null,
                   );
                 },
@@ -399,15 +542,30 @@ class DriverController extends GetxController {
     ));
   }
 
+  bool _cancellationNotificationActionable(int? rideId) {
+    if (rideId == null) return true;
+    final ride = rides.where((item) => '${item['id']}' == '$rideId').firstOrNull;
+    if (ride == null) return true;
+    final status = int.tryParse('${ride['status']}');
+    return status == 8;
+  }
+
   void _showCashPaymentDecision(int requestId, int? rideId) {
     if (Get.isDialogOpen ?? false) Get.back<void>();
     Get.dialog<void>(
       AlertDialog(
         title: const Text('تأكيد دفع نقدي'),
-        content: const Text('هل استلمت المبلغ النقدي من العميل؟ عند التأكيد افتح الرحلة وسجل التحصيل بالمبلغ الفعلي.'),
+        content: const Text(
+            'هل استلمت المبلغ النقدي من العميل؟ عند التأكيد افتح الرحلة وسجل التحصيل بالمبلغ الفعلي.'),
         actions: <Widget>[
-          TextButton(onPressed: () => decideCashPaymentRequest(requestId, false, rideId), child: const Text('لم أستلم المبلغ')),
-          FilledButton(onPressed: () => decideCashPaymentRequest(requestId, true, rideId), child: const Text('نعم، استلمته')),
+          TextButton(
+              onPressed: () =>
+                  decideCashPaymentRequest(requestId, false, rideId),
+              child: const Text('لم أستلم المبلغ')),
+          FilledButton(
+              onPressed: () =>
+                  decideCashPaymentRequest(requestId, true, rideId),
+              child: const Text('نعم، استلمته')),
         ],
       ),
       barrierDismissible: false,
@@ -419,11 +577,18 @@ class DriverController extends GetxController {
     Get.dialog<void>(
       AlertDialog(
         title: const Text('طلب إلغاء الرحلة'),
-        content: const Text('اختر القرار المناسب. القبول أو الإحالة ينقلان الطلب إلى الإدارة؛ الرفض وحده يسمح للعميل بإعادة الطلب.'),
+        content: const Text(
+            'اختر القرار المناسب. القبول أو الإحالة ينقلان الطلب إلى الإدارة؛ الرفض وحده يسمح للعميل بإعادة الطلب.'),
         actions: <Widget>[
-          TextButton(onPressed: () => decideCancellation(requestId, 'reject'), child: const Text('رفض')),
-          OutlinedButton(onPressed: () => decideCancellation(requestId, 'refer'), child: const Text('رفض وإحالة للإدارة')),
-          FilledButton(onPressed: () => decideCancellation(requestId, 'accept'), child: const Text('قبول')),
+          TextButton(
+              onPressed: () => decideCancellation(requestId, 'reject'),
+              child: const Text('رفض')),
+          OutlinedButton(
+              onPressed: () => decideCancellation(requestId, 'refer'),
+              child: const Text('رفض وإحالة للإدارة')),
+          FilledButton(
+              onPressed: () => decideCancellation(requestId, 'accept'),
+              child: const Text('قبول')),
         ],
       ),
       barrierDismissible: false,
@@ -433,6 +598,7 @@ class DriverController extends GetxController {
   @override
   void onClose() {
     _ridesPollingTimer?.cancel();
+    _paymentPollingTimer?.cancel();
     _locationSubscription?.cancel();
     super.onClose();
   }

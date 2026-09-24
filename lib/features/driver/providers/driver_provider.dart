@@ -63,6 +63,10 @@ class DriverProvider {
     return dataValue is Map ? Map<String, Object?>.from(dataValue) : <String, Object?>{};
   }
 
+  Future<Map<String, Object?>> financialReport(
+      Map<String, Object?> filters) =>
+      executeData('DriverFinancialReportModel', 'list', filters);
+
   DriverAuthResult _auth(Map<String, Object?> body) {
     final data = body['data'];
     final payload = data is Map ? Map<String, Object?>.from(data) : body;
