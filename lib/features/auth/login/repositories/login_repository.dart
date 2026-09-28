@@ -36,6 +36,7 @@ class ApiLoginRepository implements LoginRepository {
       accessToken: access,
       refreshToken: payload['refreshToken']?.toString() ?? '',
       userId: _userId(payload),
+      trustedDeviceToken: payload['trustedDeviceToken']?.toString(),
     );
   }
 
@@ -48,8 +49,15 @@ class ApiLoginRepository implements LoginRepository {
   Map<String, Object?> _payload(Object? data) {
     if (data is! Map) return <String, Object?>{};
     final map = Map<String, Object?>.from(data);
+    if (map['success'] == false) {
+      final message = map['message']?.toString().trim();
+      throw FormatException(
+        message == null || message.isEmpty
+            ? 'تعذر تسجيل الدخول. حاول مرة أخرى.'
+            : message,
+      );
+    }
     final nested = map['data'];
     return nested is Map ? Map<String, Object?>.from(nested) : map;
   }
 }
-

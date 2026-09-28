@@ -70,11 +70,23 @@ class SecureStorageService extends GetxService {
   Future<void> saveDeviceId(String value) =>
       _storage.write(key: _deviceIdKey, value: value);
 
-  Future<bool> isTrustedPhone(String phone) async =>
-      await _storage.read(key: 'trusted_device_$phone') == 'true';
+  Future<String?> trustedDeviceToken(String phone) async {
+    try {
+      return await _storage.read(
+          key: 'trusted_device_token_${_safePhoneKey(phone)}');
+    } on Object {
+      return null;
+    }
+  }
 
-  Future<void> trustPhone(String phone) =>
-      _storage.write(key: 'trusted_device_$phone', value: 'true');
+  Future<void> saveTrustedDeviceToken(String phone, String token) =>
+      _storage.write(
+        key: 'trusted_device_token_${_safePhoneKey(phone)}',
+        value: token,
+      );
+
+  String _safePhoneKey(String phone) =>
+      phone.replaceAll(RegExp(r'[^a-zA-Z0-9]'), '');
 
   Future<void> clear() {
     _temporaryAccessToken = null;

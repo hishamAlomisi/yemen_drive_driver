@@ -6,11 +6,13 @@ abstract interface class DriverRepository {
   Future<DriverAuthResult> verifyOtp(
       {required String phone,
       required String code,
-      required String challengeId});
+      required String challengeId,
+      required String deviceId});
   Future<DriverSnapshot> load(int? userId);
   Future<void> sendOffer(
       {required int rideId, required int driverId, required num amount});
-  Future<void> updateRideStatus({required int rideId, required int status, bool? customerPaymentEnabled});
+  Future<void> updateRideStatus(
+      {required int rideId, required int status, bool? customerPaymentEnabled});
   Future<void> updateLocation(
       {required int driverId,
       required double latitude,
@@ -20,7 +22,8 @@ abstract interface class DriverRepository {
   Future<Map<String, Object?>> getCashCollectionApproval(int approvalId);
   Future<Map<String, Object?>> getWallet();
   Future<Map<String, Object?>> getFinancialReport(Map<String, Object?> filters);
-  Future<void> decideCashPaymentRequest({required int requestId, required bool accept});
+  Future<void> decideCashPaymentRequest(
+      {required int requestId, required bool accept});
   Future<void> decideRideCancellation({
     required int requestId,
     required String operation,
@@ -42,6 +45,7 @@ class ApiDriverRepository implements DriverRepository {
     return DriverAuthResult(
       accessToken: payload['accessToken']?.toString(),
       refreshToken: payload['refreshToken']?.toString(),
+      trustedDeviceToken: payload['trustedDeviceToken']?.toString(),
       userId: user is Map
           ? int.tryParse('${user['id']}')
           : int.tryParse('${payload['userId']}'),
@@ -55,8 +59,13 @@ class ApiDriverRepository implements DriverRepository {
   Future<DriverAuthResult> verifyOtp(
           {required String phone,
           required String code,
-          required String challengeId}) =>
-      _provider.verifyOtp(phone: phone, code: code, challengeId: challengeId);
+          required String challengeId,
+          required String deviceId}) =>
+      _provider.verifyOtp(
+          phone: phone,
+          code: code,
+          challengeId: challengeId,
+          deviceId: deviceId);
 
   @override
   Future<DriverSnapshot> load(int? userId) async {
@@ -79,9 +88,16 @@ class ApiDriverRepository implements DriverRepository {
       });
 
   @override
-  Future<void> updateRideStatus({required int rideId, required int status, bool? customerPaymentEnabled}) =>
-      _provider.execute('RideModel', 'update',
-          <String, Object?>{'id': rideId, 'status': status, if (customerPaymentEnabled != null) 'customerPaymentEnabled': customerPaymentEnabled});
+  Future<void> updateRideStatus(
+          {required int rideId,
+          required int status,
+          bool? customerPaymentEnabled}) =>
+      _provider.execute('RideModel', 'update', <String, Object?>{
+        'id': rideId,
+        'status': status,
+        if (customerPaymentEnabled != null)
+          'customerPaymentEnabled': customerPaymentEnabled
+      });
 
   @override
   Future<void> updateLocation(
@@ -116,12 +132,15 @@ class ApiDriverRepository implements DriverRepository {
       _provider.executeData('WalletModel', 'get', <String, Object?>{});
 
   @override
-  Future<Map<String, Object?>> getFinancialReport(Map<String, Object?> filters) =>
+  Future<Map<String, Object?>> getFinancialReport(
+          Map<String, Object?> filters) =>
       _provider.financialReport(filters);
 
   @override
-  Future<void> decideCashPaymentRequest({required int requestId, required bool accept}) =>
-      _provider.execute('CashPaymentRequestModel', accept ? 'accept' : 'reject', <String, Object?>{'id': requestId});
+  Future<void> decideCashPaymentRequest(
+          {required int requestId, required bool accept}) =>
+      _provider.execute('CashPaymentRequestModel', accept ? 'accept' : 'reject',
+          <String, Object?>{'id': requestId});
 
   @override
   Future<void> decideRideCancellation({

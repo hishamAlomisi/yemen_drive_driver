@@ -2,12 +2,17 @@ import 'package:get/get.dart';
 import 'package:uuid/uuid.dart';
 
 import '../../features/auth/routes/auth_routes.dart';
+import '../../features/driver/driver_routes.dart';
+import '../network/api_client.dart';
+import '../network/api_endpoints.dart';
+import '../network/api_models.dart';
 import '../storage/secure_storage_service.dart';
 
 class AuthSessionService extends GetxService {
-  AuthSessionService(this._storage);
+  AuthSessionService(this._storage, this._apiClient);
 
   final SecureStorageService _storage;
+  final ApiClient _apiClient;
   final RxBool isAuthenticated = false.obs;
   final RxBool rememberLogin = false.obs;
   final RxnInt currentUserId = RxnInt();
@@ -17,6 +22,7 @@ class AuthSessionService extends GetxService {
   late final String deviceId;
 
   Future<AuthSessionService> init() async {
+    _apiClient.onSessionExpired = _handleServerSessionExpired;
     deviceId = await _storage.deviceId ?? const Uuid().v4();
     await _storage.saveDeviceId(deviceId);
     rememberLogin.value = await _storage.rememberMe;
@@ -31,8 +37,8 @@ class AuthSessionService extends GetxService {
     final refreshToken = await _storage.refreshToken;
     isAuthenticated.value = (accessToken?.isNotEmpty ?? false) ||
         (refreshToken?.isNotEmpty ?? false);
-    currentUserId.value =
-        await _storage.authenticatedUserId ?? _parseUserId(accessToken);
+    currentUserId.value = await _storage.authenticatedUserId;
+    if (isAuthenticated.value) await _validateStoredSession();
     return this;
   }
 
@@ -58,15 +64,7 @@ class AuthSessionService extends GetxService {
     await _storage.setRememberMe(remember);
     rememberLogin.value = remember;
     isAuthenticated.value = true;
-    currentUserId.value = userId ?? _parseUserId(accessToken);
-  }
-
-  int? _parseUserId(String? token) {
-    final value = token ?? '';
-    const prefix = 'demo-access-';
-    return value.startsWith(prefix)
-        ? int.tryParse(value.substring(prefix.length))
-        : null;
+    currentUserId.value = userId;
   }
 
   bool requireAuthentication({
@@ -88,11 +86,43 @@ class AuthSessionService extends GetxService {
     Get.offAllNamed<void>(route, arguments: arguments);
   }
 
-  Future<void> signOut() async {
+  Future<void> signOut({bool revokeServerSession = true}) async {
+    if (revokeServerSession) {
+      try {
+        await _apiClient.dio.post<Object?>(ApiEndpoints.logout);
+      } on Object {
+        // Local sign-out must still finish when the device is offline.
+      }
+    }
+    await _clearLocalSession(navigate: true);
+  }
+
+  Future<void> _validateStoredSession() async {
+    final result = await _apiClient.execute<Object?>(
+      model: 'UserModel',
+      operation: 'get',
+      data: const <String, Object?>{},
+    );
+    if (result is ApiSuccess) return;
+
+    final failure = result as ApiFailure<Object?>;
+    if (failure.problem.code == 'network_error' ||
+        failure.problem.code == 'invalid_response') {
+      return;
+    }
+    await _clearLocalSession(navigate: false);
+  }
+
+  Future<void> _handleServerSessionExpired() =>
+      _clearLocalSession(navigate: true);
+
+  Future<void> _clearLocalSession({required bool navigate}) async {
     await _storage.clear();
     rememberLogin.value = false;
     isAuthenticated.value = false;
     currentUserId.value = null;
-    Get.offAllNamed<void>('/home');
+    if (navigate && Get.key.currentState != null) {
+      Get.offAllNamed<void>(DriverRoutes.login);
+    }
   }
 }

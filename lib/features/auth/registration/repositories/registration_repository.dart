@@ -11,6 +11,7 @@ abstract interface class RegistrationRepository {
     required ProfileDraft profile,
     required String password,
     String? verificationToken,
+    required String deviceId,
   });
 }
 
@@ -43,12 +44,14 @@ class ApiRegistrationRepository implements RegistrationRepository {
     required ProfileDraft profile,
     required String password,
     String? verificationToken,
+    required String deviceId,
   }) async {
     final payload = _payload((await _provider.complete(
       signUp: signUp,
       profile: profile,
       password: password,
       verificationToken: verificationToken,
+      deviceId: deviceId,
     ))
         .data);
     return _session(payload);
@@ -63,6 +66,7 @@ class ApiRegistrationRepository implements RegistrationRepository {
       accessToken: access,
       refreshToken: payload['refreshToken']?.toString() ?? '',
       userId: _userId(payload),
+      trustedDeviceToken: payload['trustedDeviceToken']?.toString(),
     );
   }
 
@@ -75,8 +79,15 @@ class ApiRegistrationRepository implements RegistrationRepository {
   Map<String, Object?> _payload(Object? data) {
     if (data is! Map) return <String, Object?>{};
     final map = Map<String, Object?>.from(data);
+    if (map['success'] == false) {
+      final message = map['message']?.toString().trim();
+      throw FormatException(
+        message == null || message.isEmpty
+            ? 'تعذر إكمال طلب التحقق. حاول مرة أخرى.'
+            : message,
+      );
+    }
     final nested = map['data'];
     return nested is Map ? Map<String, Object?>.from(nested) : map;
   }
 }
-

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 
 import '../../../core/services/auth_session_service.dart';
+import '../../../core/storage/secure_storage_service.dart';
 import '../models/driver_models.dart';
 import '../repositories/driver_repository.dart';
 import '../driver_routes.dart';
@@ -25,7 +26,10 @@ class DriverLoginController extends GetxController {
     await _run(() async {
       final result = await _repository.login(DriverLoginRequest(
           phone: phoneController.text.trim(),
-          password: passwordController.text));
+          password: passwordController.text,
+          deviceId: _session.deviceId,
+          trustedDeviceToken: await Get.find<SecureStorageService>()
+              .trustedDeviceToken(phoneController.text.trim())));
       if (result.requiresOtp) {
         challengeId.value = result.challengeId;
         return;
@@ -40,7 +44,8 @@ class DriverLoginController extends GetxController {
       final result = await _repository.verifyOtp(
           phone: phoneController.text.trim(),
           code: otpController.text.trim(),
-          challengeId: challengeId.value!);
+          challengeId: challengeId.value!,
+          deviceId: _session.deviceId);
       await _activate(result);
     });
   }
@@ -54,6 +59,11 @@ class DriverLoginController extends GetxController {
         refreshToken: result.refreshToken ?? '',
         remember: rememberMe.value,
         userId: result.userId);
+    final trustedDeviceToken = result.trustedDeviceToken;
+    if (trustedDeviceToken != null && trustedDeviceToken.isNotEmpty) {
+      await Get.find<SecureStorageService>().saveTrustedDeviceToken(
+          phoneController.text.trim(), trustedDeviceToken);
+    }
     Get.offAllNamed<void>(DriverRoutes.home);
   }
 

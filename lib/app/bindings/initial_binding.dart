@@ -16,9 +16,18 @@ class InitialBinding extends Bindings {
     if (!Get.isRegistered<SecureStorageService>()) {
       Get.put<SecureStorageService>(SecureStorageService(), permanent: true);
     }
+    if (!Get.isRegistered<ApiClient>()) {
+      await Get.putAsync<ApiClient>(
+        () => ApiClient(Get.find<SecureStorageService>()).init(),
+        permanent: true,
+      );
+    }
     if (!Get.isRegistered<AuthSessionService>()) {
       await Get.putAsync<AuthSessionService>(
-        () => AuthSessionService(Get.find<SecureStorageService>()).init(),
+        () => AuthSessionService(
+          Get.find<SecureStorageService>(),
+          Get.find<ApiClient>(),
+        ).init(),
         permanent: true,
       );
     }
@@ -40,13 +49,6 @@ class InitialBinding extends Bindings {
         permanent: true,
       );
     }
-    if (!Get.isRegistered<ApiClient>()) {
-      await Get.putAsync<ApiClient>(
-        () => ApiClient(Get.find<SecureStorageService>()).init(),
-        permanent: true,
-      );
-    }
-
     AppEnvironment.paymentMethods = <PaymentMethodItem>[
       PaymentMethodItem(
         id: 'visa',
@@ -87,4 +89,3 @@ class InitialBinding extends Bindings {
     ];
   }
 }
-

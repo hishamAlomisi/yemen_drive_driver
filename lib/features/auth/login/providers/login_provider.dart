@@ -16,7 +16,7 @@ class LoginProvider {
           'phoneNumber': request.phone,
           'password': request.password,
           'deviceId': request.deviceId,
-          'isTrustedDevice': request.isTrustedDevice,
+          'trustedDeviceToken': request.trustedDeviceToken,
         },
       );
 
@@ -31,4 +31,3 @@ class LoginProvider {
         },
       );
 }
-

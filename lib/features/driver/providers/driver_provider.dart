@@ -13,24 +13,25 @@ class DriverProvider {
       data: <String, Object?>{
         'phoneNumber': request.phone,
         'password': request.password,
-        'deviceId': 'driver-device',
-        'isTrustedDevice': true,
+        'deviceId': request.deviceId,
+        'trustedDeviceToken': request.trustedDeviceToken,
       },
     );
-    return _map(response.data);
+    return _requireSuccess(_map(response.data));
   }
 
   Future<DriverAuthResult> verifyOtp(
       {required String phone,
       required String code,
-      required String challengeId}) async {
+      required String challengeId,
+      required String deviceId}) async {
     final response = await _client.dio.post<Object?>(
       'auth/sign-in/verify-device',
       data: <String, Object?>{
         'phoneNumber': phone,
         'code': code,
         'challengeId': challengeId,
-        'deviceId': 'driver-device',
+        'deviceId': deviceId,
       },
     );
     return _auth(_map(response.data));
@@ -57,17 +58,20 @@ class DriverProvider {
 
   Future<Map<String, Object?>> executeData(
       String model, String operation, Map<String, Object?> data) async {
-    final result = await _client.execute<Object?>(model: model, operation: operation, data: data);
+    final result = await _client.execute<Object?>(
+        model: model, operation: operation, data: data);
     if (result is ApiFailure<Object?>) throw result.problem;
     final dataValue = (result as ApiSuccess<Object?>).data;
-    return dataValue is Map ? Map<String, Object?>.from(dataValue) : <String, Object?>{};
+    return dataValue is Map
+        ? Map<String, Object?>.from(dataValue)
+        : <String, Object?>{};
   }
 
-  Future<Map<String, Object?>> financialReport(
-      Map<String, Object?> filters) =>
+  Future<Map<String, Object?>> financialReport(Map<String, Object?> filters) =>
       executeData('DriverFinancialReportModel', 'list', filters);
 
   DriverAuthResult _auth(Map<String, Object?> body) {
+    _requireSuccess(body);
     final data = body['data'];
     final payload = data is Map ? Map<String, Object?>.from(data) : body;
     final user = payload['user'];
@@ -78,9 +82,22 @@ class DriverProvider {
           ? int.tryParse('${user['id']}')
           : int.tryParse('${payload['userId']}'),
       challengeId: payload['challengeId']?.toString(),
+      trustedDeviceToken: payload['trustedDeviceToken']?.toString(),
     );
   }
 
   static Map<String, Object?> _map(Object? value) =>
       value is Map ? Map<String, Object?>.from(value) : <String, Object?>{};
+
+  Map<String, Object?> _requireSuccess(Map<String, Object?> body) {
+    if (body['success'] == false) {
+      final message = body['message']?.toString().trim();
+      throw FormatException(
+        message == null || message.isEmpty
+            ? 'تعذر تسجيل الدخول. حاول مرة أخرى.'
+            : message,
+      );
+    }
+    return body;
+  }
 }
