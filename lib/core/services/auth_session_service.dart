@@ -103,7 +103,11 @@ class AuthSessionService extends GetxService {
       operation: 'get',
       data: const <String, Object?>{},
     );
-    if (result is ApiSuccess) return;
+    if (result is ApiSuccess<Object?>) {
+      if (_hasExpectedAccountType(result.data)) return;
+      await _clearLocalSession(navigate: false);
+      return;
+    }
 
     final failure = result as ApiFailure<Object?>;
     if (failure.problem.code == 'network_error' ||
@@ -111,6 +115,13 @@ class AuthSessionService extends GetxService {
       return;
     }
     await _clearLocalSession(navigate: false);
+  }
+
+  bool _hasExpectedAccountType(Object? value) {
+    if (value is! Map) return false;
+    final role = value['role'] ?? value['Role'];
+    if (role is num) return role.toInt() == 1;
+    return role?.toString().toLowerCase() == 'driver';
   }
 
   Future<void> _handleServerSessionExpired() =>

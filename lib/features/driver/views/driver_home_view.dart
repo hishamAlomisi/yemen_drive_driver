@@ -95,7 +95,10 @@ class DriverHomeView extends GetView<DriverController> {
     final canSendOrEditOffer = !assigned &&
         ride['driverId'] == null &&
         (state == 1 || state == 2) &&
-        (offerStatus == null || offerStatus == 0);
+        (offerStatus == null ||
+            offerStatus == 0 ||
+            offerStatus == 2 ||
+            offerStatus == 3);
     const labels = {
       0: 'مسودة',
       1: 'تبحث عن سائق',
@@ -147,9 +150,11 @@ class DriverHomeView extends GetView<DriverController> {
                     FilledButton.icon(
                         onPressed: () => controller.sendOffer(ride),
                         icon: const Icon(Icons.local_offer_outlined),
-                        label: Text(ride['driverOfferAmount'] != null
-                            ? 'تعديل العرض'
-                            : 'إرسال عرض')),
+                        label: Text((offerStatus == 2 || offerStatus == 3)
+                            ? 'إرسال عرض جديد'
+                            : ride['driverOfferAmount'] != null
+                                ? 'تعديل العرض'
+                                : 'إرسال عرض')),
                   if (!assigned && ride['pickupLatitude'] != null)
                     OutlinedButton.icon(
                       onPressed: () => controller.openPickupNavigation(ride),

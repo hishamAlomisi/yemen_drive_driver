@@ -15,6 +15,7 @@ class DriverProvider {
         'password': request.password,
         'deviceId': request.deviceId,
         'trustedDeviceToken': request.trustedDeviceToken,
+        'clientType': 'driver',
       },
     );
     return _requireSuccess(_map(response.data));
@@ -32,6 +33,7 @@ class DriverProvider {
         'code': code,
         'challengeId': challengeId,
         'deviceId': deviceId,
+        'clientType': 'driver',
       },
     );
     return _auth(_map(response.data));

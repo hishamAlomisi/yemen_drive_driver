@@ -111,7 +111,14 @@ class DriverController extends GetxController {
       Get.snackbar('تم الإرسال', 'تم إرسال عرضك للعميل');
       await load();
     } catch (exception) {
-      Get.snackbar('تعذر الإرسال', exception.toString());
+      final message = exception is ApiProblemDetails
+          ? (exception.detail?.trim().isNotEmpty == true
+              ? exception.detail!
+              : exception.title)
+          : exception is FormatException
+              ? exception.message.toString()
+              : exception.toString();
+      Get.snackbar('تعذر الإرسال', message);
     }
   }
 
