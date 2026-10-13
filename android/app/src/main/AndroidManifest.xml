@@ -12,7 +12,7 @@
 
 
     <application
-        android:label="يمن درايف"
+        android:label="سائق يمن درايف"
         android:name="${applicationName}"
         android:usesCleartextTraffic="true"
         android:icon="@mipmap/ic_launcher">

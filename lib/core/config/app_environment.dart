@@ -8,7 +8,7 @@ class AppEnvironment {
   static String defaultCurrency = 'ر.ي';
   static bool useDemoData = true;
   static String googleMapsApiKey = '';
-  static String androidPackageName = 'com.example.yemen_drive';
+  static String androidPackageName = 'com.example.yemen_drive_driver';
   static String androidCertSha1 = '';
   static String signalRHubUrl = '';
   static bool _isConfigured = false;
@@ -22,7 +22,7 @@ class AppEnvironment {
     required String baseUrl,
     bool useDemoData = true,
     String googleMapsApiKey = '',
-    String androidPackageName = 'com.example.yemen_drive',
+    String androidPackageName = 'com.example.yemen_drive_driver',
     String androidCertSha1 = '',
     String signalRHubUrl = '',
   }) {
