@@ -2,13 +2,19 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../../../core/realtime/tracking_hub_service.dart';
 import '../repositories/driver_repository.dart';
 
 class DriverPaymentView extends StatefulWidget {
-  const DriverPaymentView(
-      {required this.ride, required this.repository, super.key});
+  const DriverPaymentView({
+    required this.ride,
+    required this.repository,
+    required this.hub,
+    super.key,
+  });
   final Map<String, Object?> ride;
   final DriverRepository repository;
+  final TrackingHubService hub;
 
   @override
   State<DriverPaymentView> createState() => _DriverPaymentViewState();
@@ -19,13 +25,20 @@ class _DriverPaymentViewState extends State<DriverPaymentView> {
   bool _saving = false;
   int? _approvalId;
   int? _approvalStatus;
-  Timer? _approvalPolling;
+  bool _approvalRefreshInFlight = false;
+  bool _approvalRefreshRequested = false;
+  StreamSubscription<TrackingHubEvent>? _hubEventSubscription;
+  StreamSubscription<void>? _hubConnectionSubscription;
 
   @override
   void initState() {
     super.initState();
     _cash = TextEditingController(text: _totalDue.toStringAsFixed(0));
     _cash.addListener(_onCashChanged);
+    _hubEventSubscription = widget.hub.events.listen(_handleHubEvent);
+    _hubConnectionSubscription = widget.hub.connectionRestored.listen((_) {
+      unawaited(_refreshApproval());
+    });
   }
 
   double get _fare => _number(widget.ride['customerPrice']);
@@ -44,12 +57,10 @@ class _DriverPaymentViewState extends State<DriverPaymentView> {
   double get _driverNet => _number(widget.ride['driverShare']) > 0
       ? _number(widget.ride['driverShare'])
       : _fare - _commission;
-  double get _cashReceived =>
-      double.tryParse(_cash.text.trim()) ?? _totalDue;
+  double get _cashReceived => double.tryParse(_cash.text.trim()) ?? _totalDue;
   double get _customerWalletExcess =>
       (_cashReceived - _totalDue).clamp(0, double.infinity);
-  double get _expectedDriverDebt =>
-      _platformReceivable + _customerWalletExcess;
+  double get _expectedDriverDebt => _platformReceivable + _customerWalletExcess;
   double _number(Object? value) =>
       value is num ? value.toDouble() : double.tryParse('${value ?? ''}') ?? 0;
 
@@ -59,7 +70,8 @@ class _DriverPaymentViewState extends State<DriverPaymentView> {
 
   @override
   void dispose() {
-    _approvalPolling?.cancel();
+    _hubEventSubscription?.cancel();
+    _hubConnectionSubscription?.cancel();
     _cash.removeListener(_onCashChanged);
     _cash.dispose();
     super.dispose();
@@ -85,7 +97,7 @@ class _DriverPaymentViewState extends State<DriverPaymentView> {
         if (result['requiresCustomerApproval'] == true) {
           _approvalId = int.tryParse('${result['approvalId']}');
           _approvalStatus = 0;
-          _startApprovalPolling();
+          unawaited(_refreshApproval());
           ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
               content: Text(
                   'أُرسل طلب موافقة للعميل على خصم الفرق من محفظته. انتظر القرار ثم أعد تسجيل المبلغ نفسه.')));
@@ -98,7 +110,9 @@ class _DriverPaymentViewState extends State<DriverPaymentView> {
           return;
         }
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('تم تسجيل التحصيل النقدي. اضغط «إنهاء الرحلة» بعد التحقق من اكتمال العملية.')),
+          const SnackBar(
+              content: Text(
+                  'تم تسجيل التحصيل النقدي. اضغط «إنهاء الرحلة» بعد التحقق من اكتمال العملية.')),
         );
         Navigator.of(context).pop();
       }
@@ -113,18 +127,30 @@ class _DriverPaymentViewState extends State<DriverPaymentView> {
     }
   }
 
-  void _startApprovalPolling() {
-    _approvalPolling?.cancel();
-    _approvalPolling = Timer.periodic(
-      const Duration(seconds: 4),
-      (_) => _refreshApproval(),
-    );
+  void _handleHubEvent(TrackingHubEvent event) {
+    if (event.name != 'cashApprovalUpdated') return;
+    final rideId = int.tryParse('${widget.ride['id']}');
+    final eventRideId = int.tryParse('${event.payload['rideId']}');
+    final approvalId = _approvalId;
+    final eventApprovalId =
+        int.tryParse('${event.payload['cashCollectionApprovalId']}');
+    if (rideId == null ||
+        eventRideId != rideId ||
+        approvalId == null ||
+        eventApprovalId != approvalId) {
+      return;
+    }
     unawaited(_refreshApproval());
   }
 
   Future<void> _refreshApproval() async {
     final approvalId = _approvalId;
     if (approvalId == null || !mounted) return;
+    if (_approvalRefreshInFlight) {
+      _approvalRefreshRequested = true;
+      return;
+    }
+    _approvalRefreshInFlight = true;
     try {
       final approval =
           await widget.repository.getCashCollectionApproval(approvalId);
@@ -133,7 +159,6 @@ class _DriverPaymentViewState extends State<DriverPaymentView> {
       if (status != _approvalStatus) {
         setState(() => _approvalStatus = status);
         if (status != 0) {
-          _approvalPolling?.cancel();
           final message = switch (status) {
             1 => 'وافق العميل. أعد تسجيل المبلغ نفسه لإكمال التحصيل.',
             2 => 'رفض العميل تغطية الفرق من محفظته. لم تسجل الدفعة.',
@@ -147,6 +172,12 @@ class _DriverPaymentViewState extends State<DriverPaymentView> {
     } catch (_) {
       // Keep the pending state visible. The notification screen remains the
       // fallback if the device temporarily loses connectivity.
+    } finally {
+      _approvalRefreshInFlight = false;
+      if (_approvalRefreshRequested && mounted) {
+        _approvalRefreshRequested = false;
+        unawaited(_refreshApproval());
+      }
     }
   }
 

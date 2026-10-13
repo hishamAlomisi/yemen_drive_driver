@@ -5,10 +5,11 @@ import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:get/get.dart';
 
-import '../../../core/services/auth_session_service.dart';
 import '../../../core/network/api_models.dart';
-import '../repositories/driver_repository.dart';
+import '../../../core/realtime/tracking_hub_service.dart';
+import '../../../core/services/auth_session_service.dart';
 import '../driver_routes.dart';
+import '../repositories/driver_repository.dart';
 import '../views/driver_payment_view.dart';
 
 class DriverController extends GetxController {
@@ -17,6 +18,7 @@ class DriverController extends GetxController {
   final AuthSessionService _session;
   final isLoading = false.obs;
   final RxnString error = RxnString();
+  final Rxn<Position> currentPosition = Rxn<Position>();
   final Rxn<Map<String, Object?>> profile = Rxn<Map<String, Object?>>();
   final rides = <Map<String, Object?>>[].obs;
   final notifications = <Map<String, Object?>>[].obs;
@@ -33,11 +35,16 @@ class DriverController extends GetxController {
   final RxString financialSearch = ''.obs;
   final RxnInt financialType = RxnInt();
   final RxBool financialFiltersVisible = false.obs;
-  Timer? _ridesPollingTimer;
-  Timer? _paymentPollingTimer;
+  final RxnInt focusedRideId = RxnInt();
   final paymentEnabledRideIds = <int>{};
+  final Set<int> _paymentChecksInFlight = <int>{};
   StreamSubscription<Position>? _locationSubscription;
+  StreamSubscription<TrackingHubEvent>? _hubEventSubscription;
+  StreamSubscription<void>? _hubConnectionSubscription;
   bool _refreshInFlight = false;
+  bool _initialSnapshotLoaded = false;
+  final List<TrackingHubEvent> _eventsReceivedDuringRefresh =
+      <TrackingHubEvent>[];
   bool _locationUpdateInFlight = false;
   DateTime? _lastLocationSentAt;
   Position? _lastSentPosition;
@@ -47,18 +54,201 @@ class DriverController extends GetxController {
   @override
   void onReady() {
     super.onReady();
-    unawaited(_startRidesPolling());
-    unawaited(_startRealLocationUpdates());
+    unawaited(_startRealtimeAndLocation());
   }
 
-  Future<void> _startRidesPolling() async {
+  Future<void> _startRealtimeAndLocation() async {
+    await _startRealtimeAndLoad();
+    final arguments = Get.arguments;
+    if (arguments is Map && arguments['openNotification'] == true) {
+      final rawPayload = arguments['pushNotification'];
+      if (rawPayload is Map) {
+        await _openPushNotification(
+          rawPayload.map((key, value) => MapEntry('$key', '$value')),
+        );
+      }
+    }
+    await _startRealLocationUpdates();
+  }
+
+  Future<void> _openPushNotification(Map<String, String> payload) async {
+    final id = int.tryParse('${payload['notificationId'] ?? ''}');
+    final notification = id == null
+        ? null
+        : notifications
+            .where((item) => int.tryParse('${item['id']}') == id)
+            .firstOrNull;
+    final action = payload['action']?.trim().toLowerCase();
+    final rideId = int.tryParse('${payload['rideId'] ?? ''}');
+    if (_opensWallet(action, payload)) {
+      if (notification != null) await markNotificationRead(notification);
+      Get.offAllNamed<void>(DriverRoutes.wallet, arguments: payload);
+      return;
+    }
+
+    if (notification == null) {
+      final cancellationId =
+          int.tryParse('${payload['cancellationRequestId'] ?? ''}');
+      if (cancellationId != null &&
+          _cancellationNotificationActionable(rideId)) {
+        _showCancellationDecision(cancellationId);
+        return;
+      }
+      final cashPaymentId =
+          int.tryParse('${payload['cashPaymentRequestId'] ?? ''}');
+      if (cashPaymentId != null) {
+        _showCashPaymentDecision(cashPaymentId, rideId);
+        return;
+      }
+      if (rideId != null) {
+        focusedRideId.value = rideId;
+        final ride = rides
+            .where((item) => int.tryParse('${item['id']}') == rideId)
+            .firstOrNull;
+        if (ride != null && action == 'open_active_ride') {
+          await openPickupNavigation(ride);
+        }
+        return;
+      }
+      showNotifications();
+      return;
+    }
+
+    final cancellationId = cancellationRequestId(notification);
+    if (cancellationId != null &&
+        notification['isRead'] != true &&
+        _cancellationNotificationActionable(notificationRideId(notification))) {
+      _showCancellationDecision(cancellationId);
+      return;
+    }
+    final cashPaymentId = cashPaymentRequestId(notification);
+    final notificationRideIdValue = notificationRideId(notification);
+    if (cashPaymentId != null &&
+        _cashNotificationActionable(notification, notificationRideIdValue)) {
+      _showCashPaymentDecision(cashPaymentId, notificationRideIdValue);
+      return;
+    }
+    if (notificationRideIdValue != null)
+      focusedRideId.value = notificationRideIdValue;
+    await markNotificationRead(notification);
+    showNotifications();
+  }
+
+  bool _opensWallet(String? action, Map<String, String> payload) =>
+      action == 'open_wallet' ||
+      action == 'open_wallet_transaction' ||
+      action == 'open_driver_wallet' ||
+      action == 'open_driver_account' ||
+      payload['walletTransactionId']?.isNotEmpty == true ||
+      payload['driverSettlementPaymentId']?.isNotEmpty == true;
+
+  Future<void> _startRealtimeAndLoad() async {
+    if (Get.isRegistered<TrackingHubService>()) {
+      final hub = Get.find<TrackingHubService>();
+      _hubEventSubscription = hub.events.listen(_handleHubEvent);
+      _hubConnectionSubscription = hub.connectionRestored.listen((_) {
+        if (_initialSnapshotLoaded) unawaited(load(showLoading: false));
+      });
+      await hub.setUserEventListening(this, true);
+    }
     await load();
-    _ridesPollingTimer?.cancel();
-    _paymentPollingTimer?.cancel();
-    _paymentPollingTimer = null;
-    _ridesPollingTimer = Timer.periodic(const Duration(seconds: 5), (_) {
-      unawaited(load(showLoading: false));
-    });
+    _initialSnapshotLoaded = true;
+  }
+
+  void _handleHubEvent(TrackingHubEvent event) {
+    if (_refreshInFlight) {
+      _eventsReceivedDuringRefresh.add(event);
+      return;
+    }
+    final payload = event.payload;
+    if (event.name == 'notificationCreated') {
+      unawaited(_refreshNotifications());
+      return;
+    }
+    final rideId = int.tryParse('${payload['id'] ?? payload['rideId'] ?? ''}');
+    if (rideId == null) return;
+
+    if (event.name == 'rideAvailable') {
+      _upsertRide(payload, rideId);
+      return;
+    }
+    if (event.name == 'rideUnavailable') {
+      rides.removeWhere((ride) =>
+          int.tryParse('${ride['id']}') == rideId &&
+          '${ride['driverId'] ?? ''}' != '${currentUserId ?? ''}');
+      return;
+    }
+    if (event.name == 'paymentUpdated') {
+      if (paymentEnabledRideIds.contains(rideId)) {
+        unawaited(_refreshEnabledPayment(rideId));
+      }
+      return;
+    }
+    if (event.name == 'rideStatusUpdated') {
+      final rideStatus = int.tryParse('${payload['rideStatus'] ?? ''}');
+      final index =
+          rides.indexWhere((ride) => int.tryParse('${ride['id']}') == rideId);
+      if (rideStatus != null && index >= 0) {
+        final updatedRide = Map<String, Object?>.from(rides[index]);
+        updatedRide['status'] = rideStatus;
+        updatedRide['customerPaymentEnabled'] =
+            payload['customerPaymentEnabled'] == true;
+        rides[index] = updatedRide;
+        _syncActiveRideSubscriptions();
+      }
+      return;
+    }
+    if (event.name != 'offerUpdated') return;
+
+    final driverId = int.tryParse('${payload['driverId'] ?? ''}');
+    final assignedDriverId =
+        int.tryParse('${payload['assignedDriverId'] ?? ''}');
+    final rideStatus = int.tryParse('${payload['rideStatus'] ?? ''}');
+    if (rideStatus == 3 && assignedDriverId == currentUserId) {
+      final rawRide = payload['rideSnapshot'];
+      if (rawRide is Map<Object?, Object?>) {
+        _upsertRide(Map<String, Object?>.from(rawRide), rideId);
+        _syncActiveRideSubscriptions();
+      }
+      return;
+    }
+    if (rideStatus == 3 && assignedDriverId != currentUserId) {
+      rides.removeWhere((ride) => int.tryParse('${ride['id']}') == rideId);
+      _syncActiveRideSubscriptions();
+      return;
+    }
+
+    final index =
+        rides.indexWhere((ride) => int.tryParse('${ride['id']}') == rideId);
+    if (index < 0 || driverId != currentUserId) return;
+    final updatedRide = Map<String, Object?>.from(rides[index]);
+    updatedRide['driverOfferAmount'] = payload['amount'];
+    updatedRide['driverOfferExpiresAtUtc'] = payload['expiresAtUtc'];
+    updatedRide['driverOfferStatus'] = payload['status'];
+    rides[index] = updatedRide;
+  }
+
+  void _upsertRide(Map<String, Object?> ride, int rideId) {
+    final index =
+        rides.indexWhere((item) => int.tryParse('${item['id']}') == rideId);
+    if (index < 0) {
+      rides.insert(0, Map<String, Object?>.from(ride));
+    } else {
+      rides[index] = Map<String, Object?>.from(ride);
+    }
+  }
+
+  void _syncActiveRideSubscriptions() {
+    if (!Get.isRegistered<TrackingHubService>()) return;
+    final rideIds = rides
+        .where(
+          (ride) =>
+              ride['driverId']?.toString() == currentUserId?.toString() &&
+              <int>{3, 4, 5, 8}.contains(int.tryParse('${ride['status']}')),
+        )
+        .map((ride) => int.tryParse('${ride['id']}'))
+        .whereType<int>();
+    unawaited(Get.find<TrackingHubService>().setRideSubscriptions(rideIds));
   }
 
   Future<void> load({bool showLoading = true}) async {
@@ -72,7 +262,28 @@ class DriverController extends GetxController {
       final snapshot = await _repository.load(_session.currentUserId.value);
       profile.value = snapshot.profile;
       rides.assignAll(snapshot.rides);
-      paymentEnabledRideIds.removeWhere((id) => snapshot.rides.any((r) => '${r['id']}' == '$id' && r['paymentCompleted'] == true));
+      paymentEnabledRideIds
+        ..clear()
+        ..addAll(snapshot.rides
+            .where((ride) =>
+                ride['customerPaymentEnabled'] == true &&
+                ride['paymentCompleted'] != true)
+            .map((ride) => int.tryParse('${ride['id']}'))
+            .whereType<int>());
+      final activeRideIds = snapshot.rides
+          .where(
+            (ride) =>
+                ride['driverId']?.toString() ==
+                    _session.currentUserId.value?.toString() &&
+                <int>{3, 4, 5, 8}.contains(int.tryParse('${ride['status']}')),
+          )
+          .map((ride) => int.tryParse('${ride['id']}'))
+          .whereType<int>();
+      if (Get.isRegistered<TrackingHubService>()) {
+        unawaited(
+          Get.find<TrackingHubService>().setRideSubscriptions(activeRideIds),
+        );
+      }
       notifications.assignAll(await _repository.notifications());
     } catch (exception) {
       // A transient polling failure must not hide the last usable snapshot.
@@ -80,6 +291,13 @@ class DriverController extends GetxController {
     } finally {
       _refreshInFlight = false;
       if (showLoading) isLoading.value = false;
+      if (_eventsReceivedDuringRefresh.isNotEmpty) {
+        final queued = List<TrackingHubEvent>.of(_eventsReceivedDuringRefresh);
+        _eventsReceivedDuringRefresh.clear();
+        for (final event in queued) {
+          _handleHubEvent(event);
+        }
+      }
     }
   }
 
@@ -111,7 +329,14 @@ class DriverController extends GetxController {
       Get.snackbar('تم الإرسال', 'تم إرسال عرضك للعميل');
       await load();
     } catch (exception) {
-      Get.snackbar('تعذر الإرسال', exception.toString());
+      final message = exception is ApiProblemDetails
+          ? (exception.detail?.trim().isNotEmpty == true
+              ? exception.detail!
+              : exception.title)
+          : exception is FormatException
+              ? exception.message.toString()
+              : exception.toString();
+      Get.snackbar('تعذر الإرسال', message);
     }
   }
 
@@ -137,9 +362,11 @@ class DriverController extends GetxController {
     final id = int.tryParse('${ride['id']}');
     if (id == null || ride['paymentCompleted'] == true) return;
     try {
-      await _repository.updateRideStatus(rideId: id, status: int.tryParse('${ride['status']}') ?? 5, customerPaymentEnabled: true);
+      await _repository.updateRideStatus(
+          rideId: id,
+          status: int.tryParse('${ride['status']}') ?? 5,
+          customerPaymentEnabled: true);
       paymentEnabledRideIds.add(id);
-      _paymentPollingTimer ??= Timer.periodic(const Duration(seconds: 5), (_) => _pollEnabledPayments());
       Get.snackbar('تمكين الدفع', 'أصبح بإمكان العميل إتمام الدفع الآن.');
       await load(showLoading: false);
     } catch (exception) {
@@ -147,19 +374,35 @@ class DriverController extends GetxController {
     }
   }
 
-  Future<void> _pollEnabledPayments() async {
-    if (paymentEnabledRideIds.isEmpty) {
-      _paymentPollingTimer?.cancel();
-      _paymentPollingTimer = null;
+  Future<void> _refreshEnabledPayment(int rideId) async {
+    if (!paymentEnabledRideIds.contains(rideId) ||
+        !_paymentChecksInFlight.add(rideId)) {
       return;
     }
-    await load(showLoading: false);
-    final completed = paymentEnabledRideIds.where((id) => rides.any((r) => '${r['id']}' == '$id' && r['paymentCompleted'] == true)).toList();
-    paymentEnabledRideIds.removeAll(completed);
-    if (paymentEnabledRideIds.isEmpty) {
-      _paymentPollingTimer?.cancel();
-      _paymentPollingTimer = null;
+    try {
+      if (!await _repository.isRidePaymentCompleted(rideId)) return;
+      paymentEnabledRideIds.remove(rideId);
+      final index =
+          rides.indexWhere((ride) => int.tryParse('${ride['id']}') == rideId);
+      if (index >= 0) {
+        rides[index] = <String, Object?>{
+          ...rides[index],
+          'paymentCompleted': true,
+        };
+      }
       Get.snackbar('تم الدفع', 'تم تأكيد تحصيل مبلغ الرحلة.');
+    } catch (_) {
+      // A reconnect or the next payment event can reconcile this state.
+    } finally {
+      _paymentChecksInFlight.remove(rideId);
+    }
+  }
+
+  Future<void> _refreshNotifications() async {
+    try {
+      notifications.assignAll(await _repository.notifications());
+    } catch (_) {
+      // The notification snapshot remains available if this request fails.
     }
   }
 
@@ -169,6 +412,7 @@ class DriverController extends GetxController {
     await Get.to<void>(() => DriverPaymentView(
           ride: ride,
           repository: _repository,
+          hub: Get.find<TrackingHubService>(),
         ));
     await load(showLoading: false);
   }
@@ -182,7 +426,7 @@ class DriverController extends GetxController {
       final items = wallet['transactions'];
       walletTransactions.assignAll(items is List
           ? items
-              .whereType<Map>()
+              .whereType<Map<Object?, Object?>>()
               .map((item) => Map<String, Object?>.from(item))
               .toList()
           : const <Map<String, Object?>>[]);
@@ -201,19 +445,25 @@ class DriverController extends GetxController {
       final from = financialFrom.value;
       final to = financialTo.value;
       final report = await _repository.getFinancialReport(<String, Object?>{
-        'from': DateTime(from.year, from.month, from.day).toUtc().toIso8601String(),
+        'from':
+            DateTime(from.year, from.month, from.day).toUtc().toIso8601String(),
         'to': DateTime(to.year, to.month, to.day).toUtc().toIso8601String(),
-        if (financialSearch.value.trim().isNotEmpty) 'query': financialSearch.value.trim(),
+        if (financialSearch.value.trim().isNotEmpty)
+          'query': financialSearch.value.trim(),
         if (financialType.value != null) 'entryType': financialType.value,
       });
       driverAccountBalance.value = _number(report['balance']);
       driverCommissionTotal.value = _number(report['totalCommission']);
       final items = report['transactions'];
       driverAccountTransactions.assignAll(items is List
-          ? items.whereType<Map>().map((item) => Map<String, Object?>.from(item)).toList()
+          ? items
+              .whereType<Map<Object?, Object?>>()
+              .map((item) => Map<String, Object?>.from(item))
+              .toList()
           : const <Map<String, Object?>>[]);
     } catch (exception) {
-      Get.snackbar('تعذر تحميل حساب السائق', 'تحقق من الاتصال ثم أعد المحاولة.');
+      Get.snackbar(
+          'تعذر تحميل حساب السائق', 'تحقق من الاتصال ثم أعد المحاولة.');
     } finally {
       isDriverAccountLoading.value = false;
     }
@@ -293,8 +543,8 @@ class DriverController extends GetxController {
       await _locationSubscription?.cancel();
       _locationSubscription = Geolocator.getPositionStream(
         locationSettings: const LocationSettings(
-          accuracy: LocationAccuracy.high,
-          distanceFilter: 20,
+          accuracy: LocationAccuracy.bestForNavigation,
+          distanceFilter: 5,
         ),
       ).listen(
         (position) => unawaited(_publishLocation(position)),
@@ -332,6 +582,7 @@ class DriverController extends GetxController {
     bool showMessage = false,
     bool force = false,
   }) async {
+    currentPosition.value = position;
     final driverId = _session.currentUserId.value;
     if (driverId == null || _locationUpdateInFlight) return;
     final previous = _lastSentPosition;
@@ -346,18 +597,46 @@ class DriverController extends GetxController {
           );
     if (!force &&
         lastUpdate != null &&
-        DateTime.now().difference(lastUpdate) < const Duration(seconds: 15) &&
-        movedMeters < 20) {
+        DateTime.now().difference(lastUpdate) < const Duration(seconds: 2) &&
+        movedMeters < 5) {
+      return;
+    }
+
+    if (!position.accuracy.isFinite ||
+        position.accuracy <= 0 ||
+        position.accuracy > 75) {
       return;
     }
 
     _locationUpdateInFlight = true;
     try {
-      await _repository.updateLocation(
-        driverId: driverId,
-        latitude: position.latitude,
-        longitude: position.longitude,
-      );
+      Map<String, Object?>? activeRide;
+      for (final ride in rides) {
+        if ('${ride['driverId'] ?? ''}' == '$driverId' &&
+            <int>{3, 4, 5, 8}.contains(int.tryParse('${ride['status']}'))) {
+          activeRide = ride;
+          break;
+        }
+      }
+      final hub = Get.isRegistered<TrackingHubService>()
+          ? Get.find<TrackingHubService>()
+          : null;
+      if (hub == null) return;
+      final sent = await hub.publishDriverLocation(<String, Object?>{
+        'rideId':
+            activeRide == null ? null : int.tryParse('${activeRide['id']}'),
+        'latitude': position.latitude,
+        'longitude': position.longitude,
+        'bearing': position.heading.isFinite && position.heading >= 0
+            ? position.heading % 360
+            : null,
+        'speed': position.speed.isFinite && position.speed >= 0
+            ? position.speed
+            : null,
+        'accuracy': position.accuracy,
+        'observedAtUtc': position.timestamp.toUtc().toIso8601String(),
+      });
+      if (!sent) return;
       _lastLocationSentAt = DateTime.now();
       _lastSentPosition = position;
       if (showMessage) {
@@ -415,10 +694,12 @@ class DriverController extends GetxController {
       Map<String, Object?> notification, int? rideId) {
     if (notification['isRead'] == true) return false;
     if (rideId == null) return true;
-    final ride = rides.where((item) => '${item['id']}' == '$rideId').firstOrNull;
+    final ride =
+        rides.where((item) => '${item['id']}' == '$rideId').firstOrNull;
     if (ride == null) return true;
     final status = int.tryParse('${ride['status']}');
-    return status != 6 && status != 7 &&
+    return status != 6 &&
+        status != 7 &&
         ride['paymentCompleted'] != true &&
         int.tryParse('${ride['cashPaymentRequestStatus']}') != 3;
   }
@@ -435,6 +716,16 @@ class DriverController extends GetxController {
         (item) => cashPaymentRequestId(item) == requestId,
       );
       if (notificationIndex >= 0) {
+        final notificationId =
+            int.tryParse('${notifications[notificationIndex]['id'] ?? ''}');
+        if (notificationId != null) {
+          try {
+            await _repository.markNotificationRead(notificationId);
+          } on Object {
+            // The payment decision is authoritative even if the read marker
+            // cannot be synchronized immediately.
+          }
+        }
         notifications[notificationIndex] = <String, Object?>{
           ...notifications[notificationIndex],
           'isRead': true,
@@ -469,6 +760,16 @@ class DriverController extends GetxController {
         (item) => cancellationRequestId(item) == requestId,
       );
       if (notificationIndex >= 0) {
+        final notificationId =
+            int.tryParse('${notifications[notificationIndex]['id'] ?? ''}');
+        if (notificationId != null) {
+          try {
+            await _repository.markNotificationRead(notificationId);
+          } on Object {
+            // The cancellation decision is authoritative even if its read
+            // marker needs a later synchronization.
+          }
+        }
         notifications[notificationIndex] = <String, Object?>{
           ...notifications[notificationIndex],
           'isRead': true,
@@ -501,11 +802,9 @@ class DriverController extends GetxController {
                   final cancellationId = cancellationRequestId(item);
                   final cashPaymentId = cashPaymentRequestId(item);
                   final rideId = notificationRideId(item);
-                  final cashActionable =
-                      cashPaymentId != null &&
+                  final cashActionable = cashPaymentId != null &&
                       _cashNotificationActionable(item, rideId);
-                  final cancellationActionable =
-                      cancellationId != null &&
+                  final cancellationActionable = cancellationId != null &&
                       item['isRead'] != true &&
                       _cancellationNotificationActionable(rideId);
                   return ListTile(
@@ -527,8 +826,8 @@ class DriverController extends GetxController {
                         ? () => _showCancellationDecision(cancellationId)
                         : cashActionable
                             ? () =>
-                                _showCashPaymentDecision(cashPaymentId!, rideId)
-                            : null,
+                                _showCashPaymentDecision(cashPaymentId, rideId)
+                            : () => markNotificationRead(item),
                   );
                 },
               ),
@@ -542,9 +841,30 @@ class DriverController extends GetxController {
     ));
   }
 
+  Future<void> markNotificationRead(Map<String, Object?> item) async {
+    if (item['isRead'] == true) return;
+    final id = int.tryParse('${item['id'] ?? ''}');
+    if (id == null) return;
+    try {
+      await _repository.markNotificationRead(id);
+      final index = notifications.indexWhere(
+        (value) => int.tryParse('${value['id']}') == id,
+      );
+      if (index >= 0) {
+        notifications[index] = <String, Object?>{
+          ...notifications[index],
+          'isRead': true,
+        };
+      }
+    } on Object {
+      Get.snackbar('تعذر تحديث الإشعار', 'تحقق من الاتصال ثم حاول مرة أخرى.');
+    }
+  }
+
   bool _cancellationNotificationActionable(int? rideId) {
     if (rideId == null) return true;
-    final ride = rides.where((item) => '${item['id']}' == '$rideId').firstOrNull;
+    final ride =
+        rides.where((item) => '${item['id']}' == '$rideId').firstOrNull;
     if (ride == null) return true;
     final status = int.tryParse('${ride['status']}');
     return status == 8;
@@ -597,9 +917,14 @@ class DriverController extends GetxController {
 
   @override
   void onClose() {
-    _ridesPollingTimer?.cancel();
-    _paymentPollingTimer?.cancel();
     _locationSubscription?.cancel();
+    _hubEventSubscription?.cancel();
+    _hubConnectionSubscription?.cancel();
+    if (Get.isRegistered<TrackingHubService>()) {
+      unawaited(
+        Get.find<TrackingHubService>().setUserEventListening(this, false),
+      );
+    }
     super.onClose();
   }
 }

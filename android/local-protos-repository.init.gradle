@@ -1,0 +1,14 @@
+def localProtosRepository = file("E:/Driver/.gradle-local-repo")
+def androidProjectRoot = file("E:/Driver/yemen_drive_driver/android").canonicalFile
+
+gradle.beforeProject { project ->
+    if (project.rootProject.projectDir.canonicalFile != androidProjectRoot) {
+        return
+    }
+    project.buildscript.repositories.maven {
+        url = localProtosRepository.toURI()
+    }
+    project.repositories.maven {
+        url = localProtosRepository.toURI()
+    }
+}

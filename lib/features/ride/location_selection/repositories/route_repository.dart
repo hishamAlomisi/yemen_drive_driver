@@ -7,7 +7,22 @@ abstract interface class RouteRepository {
   Future<DrivingRoute> getDrivingRoute({
     required LatLng origin,
     required LatLng destination,
+    bool includeSteps = false,
   });
+}
+
+class DrivingRouteStep {
+  const DrivingRouteStep({
+    required this.instruction,
+    required this.maneuver,
+    required this.distanceMeters,
+    required this.durationSeconds,
+  });
+
+  final String instruction;
+  final String maneuver;
+  final int distanceMeters;
+  final int durationSeconds;
 }
 
 class DrivingRoute {
@@ -15,11 +30,13 @@ class DrivingRoute {
     required this.points,
     required this.distanceMeters,
     required this.durationSeconds,
+    this.steps = const <DrivingRouteStep>[],
   });
 
   final List<LatLng> points;
   final int distanceMeters;
   final int durationSeconds;
+  final List<DrivingRouteStep> steps;
 }
 
 /// Routes are obtained through YemenDrive API. Google credentials are never
@@ -32,6 +49,7 @@ class ApiRoutesRepository implements RouteRepository {
   Future<DrivingRoute> getDrivingRoute({
     required LatLng origin,
     required LatLng destination,
+    bool includeSteps = false,
   }) async {
     final result = await _client.execute<Object?>(
       model: 'MapRouteQuoteModel',
@@ -41,6 +59,7 @@ class ApiRoutesRepository implements RouteRepository {
         'originLongitude': origin.longitude,
         'destinationLatitude': destination.latitude,
         'destinationLongitude': destination.longitude,
+        'includeSteps': includeSteps,
       },
     );
     if (result is ApiFailure<Object?>) {
@@ -66,10 +85,27 @@ class ApiRoutesRepository implements RouteRepository {
       throw const RouteRequestException(
           statusCode: 0, message: 'بيانات المسار غير مكتملة.');
     }
+    final steps = <DrivingRouteStep>[];
+    final rawSteps = data['steps'];
+    if (rawSteps is List) {
+      for (final rawStep in rawSteps) {
+        if (rawStep is! Map) continue;
+        final step = Map<Object?, Object?>.from(rawStep);
+        final instruction = '${step['instruction'] ?? ''}'.trim();
+        if (instruction.isEmpty) continue;
+        steps.add(DrivingRouteStep(
+          instruction: instruction,
+          maneuver: '${step['maneuver'] ?? ''}',
+          distanceMeters: (step['distanceMeters'] as num?)?.toInt() ?? 0,
+          durationSeconds: (step['durationSeconds'] as num?)?.toInt() ?? 0,
+        ));
+      }
+    }
     return DrivingRoute(
       points: _decodePolyline(encoded),
       distanceMeters: distanceMeters,
       durationSeconds: durationSeconds,
+      steps: steps,
     );
   }
 

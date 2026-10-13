@@ -7,6 +7,7 @@ class SecureStorageService extends GetxService {
   static const String _rememberMeKey = 'remember_me';
   static const String _userIdKey = 'authenticated_user_id';
   static const String _deviceIdKey = 'device_id';
+  static const String _pendingPushTokenKey = 'pending_push_token';
   static const FlutterSecureStorage _storage = FlutterSecureStorage();
 
   String? _temporaryAccessToken;
@@ -21,6 +22,8 @@ class SecureStorageService extends GetxService {
   Future<String?> get deviceId => _storage.read(key: _deviceIdKey);
   Future<int?> get authenticatedUserId async =>
       int.tryParse(await _storage.read(key: _userIdKey) ?? '');
+  Future<String?> get pendingPushToken =>
+      _storage.read(key: _pendingPushTokenKey);
 
   Future<void> saveTokens({
     required String accessToken,
@@ -70,10 +73,19 @@ class SecureStorageService extends GetxService {
   Future<void> saveDeviceId(String value) =>
       _storage.write(key: _deviceIdKey, value: value);
 
+  /// Retains a newly-issued FCM token until the authenticated API accepts it.
+  /// It is cleared on successful registration or when the local session ends.
+  Future<void> savePendingPushToken(String value) =>
+      _storage.write(key: _pendingPushTokenKey, value: value);
+
+  Future<void> clearPendingPushToken() =>
+      _storage.delete(key: _pendingPushTokenKey);
+
   Future<String?> trustedDeviceToken(String phone) async {
     try {
       return await _storage.read(
-          key: 'trusted_device_token_${_safePhoneKey(phone)}');
+        key: 'trusted_device_token_${_safePhoneKey(phone)}',
+      );
     } on Object {
       return null;
     }
@@ -96,6 +108,7 @@ class SecureStorageService extends GetxService {
       _storage.delete(key: _refreshTokenKey),
       _storage.delete(key: _rememberMeKey),
       _storage.delete(key: _userIdKey),
+      _storage.delete(key: _pendingPushTokenKey),
     ]);
   }
 

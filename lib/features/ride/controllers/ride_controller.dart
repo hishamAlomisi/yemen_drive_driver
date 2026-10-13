@@ -8,6 +8,7 @@ import 'package:get/get.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 import '../../../core/config/app_environment.dart';
+import '../../../core/realtime/tracking_hub_service.dart';
 import '../../../core/services/auth_session_service.dart';
 import '../../../core/services/connectivity_service.dart';
 import '../../../core/services/ride_preferences.dart';
@@ -72,9 +73,11 @@ class RideController extends GetxController {
   final Rxn<DriverTrackingSnapshot> trackedDriver =
       Rxn<DriverTrackingSnapshot>();
   final Rxn<RideCoordinate> trackedPassenger = Rxn<RideCoordinate>();
-  StreamSubscription<DriverOffer>? _offersSubscription;
+  StreamSubscription<TrackingHubEvent>? _hubEventSubscription;
+  StreamSubscription<void>? _hubConnectionSubscription;
   Timer? _trackingTimer;
   Timer? _recipientTimer;
+  Timer? _offersDeadlineTimer;
   StreamSubscription<Position>? _passengerPositionSubscription;
   String? _requestId;
   bool _isResumingRequest = false;
@@ -89,6 +92,16 @@ class RideController extends GetxController {
     }
     unawaited(loadServiceCatalog());
     unawaited(_loadHomeServices());
+    if (Get.isRegistered<TrackingHubService>()) {
+      final hub = Get.find<TrackingHubService>();
+      _hubEventSubscription = hub.events.listen(_handleHubEvent);
+      _hubConnectionSubscription = hub.connectionRestored.listen((_) {
+        final rideId = _requestId;
+        if (rideId != null && isSearchingForDriver.value) {
+          unawaited(_refreshOffersSnapshotSafely(rideId));
+        }
+      });
+    }
   }
 
   Future<void> _loadHomeServices() async {
@@ -778,23 +791,106 @@ class RideController extends GetxController {
     );
     currentDraft.value = draft;
     _requestId = await _repository.createRequest(draft);
-    await _offersSubscription?.cancel();
-    _offersSubscription = _repository.watchOffers(_requestId!).listen(
-      (offer) {
-        offersExhausted.value = false;
-        receivedOffersCount.value++;
+    _offersDeadlineTimer?.cancel();
+    _offersDeadlineTimer = Timer(const Duration(minutes: 2), () {
+      offersStreamDone.value = true;
+      _updateOffersExhausted();
+    });
+    await _watchOffers(_requestId!);
+  }
+
+  Future<void> _watchOffers(String requestId) async {
+    final rideId = int.tryParse(requestId);
+    if (rideId == null || !Get.isRegistered<TrackingHubService>()) return;
+    try {
+      await Get.find<TrackingHubService>()
+          .setRideSubscriptions(<int>{rideId});
+      await _refreshOffersSnapshot(requestId);
+    } catch (_) {
+      Get.snackbar('تعذر تحديث حالة البحث', 'تحقق من الاتصال ثم أعد المحاولة.');
+    }
+  }
+
+  Future<void> _refreshOffersSnapshot([String? requestId]) async {
+    final id = requestId ?? _requestId;
+    if (id == null || id != _requestId) return;
+    final detail = await _repository.getRideDetail(id);
+    if (id != _requestId || !isSearchingForDriver.value) return;
+    final rawRide = detail['ride'];
+    final ride = rawRide is Map
+        ? Map<Object?, Object?>.from(rawRide)
+        : const <Object?, Object?>{};
+    final status = int.tryParse('${ride['status'] ?? ''}');
+    final rawOffers = detail['offers'];
+    final allOffers = rawOffers is List
+        ? rawOffers
+            .whereType<Map<Object?, Object?>>()
+            .map((item) => Map<String, Object?>.from(item))
+            .map(_repository.mapRealtimeOffer)
+            .whereType<DriverOffer>()
+            .toList(growable: false)
+        : const <DriverOffer>[];
+    if (status != null && <int>{3, 4, 5, 8}.contains(status)) {
+      acceptedOffer.value = allOffers
+          .where((offer) => offer.status == DriverOfferStatus.accepted)
+          .firstOrNull;
+      driverFound();
+      return;
+    }
+    final offers = allOffers
+        .where((offer) => offer.status == DriverOfferStatus.pending)
+        .where((offer) => offer.expiresAt == null ||
+            offer.expiresAt!.isAfter(DateTime.now()))
+        .toList(growable: false);
+    driverOffers.assignAll(offers);
+    receivedOffersCount.value = offers.length;
+    _updateOffersExhausted();
+  }
+
+  Future<void> _refreshOffersSnapshotSafely(String requestId) async {
+    try {
+      await _refreshOffersSnapshot(requestId);
+    } catch (_) {
+      // The next reconnect or explicit retry can restore the current snapshot.
+    }
+  }
+
+  void _handleHubEvent(TrackingHubEvent event) {
+    final payload = event.payload;
+    final rideId = '${payload['rideId'] ?? payload['rideID'] ?? ''}';
+    if (rideId != _requestId) return;
+    if (event.name == 'rideUnavailable') {
+      if (!isSearchingForDriver.value) return;
+      isSearchingForDriver.value = false;
+      offersExhausted.value = true;
+      driverOffers.clear();
+      _offersDeadlineTimer?.cancel();
+      unawaited(Get.find<TrackingHubService>()
+          .setRideSubscriptions(const <int>{}));
+      return;
+    }
+    if (event.name != 'offerReceived' && event.name != 'offerUpdated') return;
+    final offer = _repository.mapRealtimeOffer(payload);
+    if (offer == null) return;
+    final index = driverOffers.indexWhere((item) => item.id == offer.id);
+    if (offer.status == DriverOfferStatus.pending) {
+      if (index < 0) {
         driverOffers.add(offer);
-      },
-      onError: (_) {
-        _recipientTimer?.cancel();
-        isSearchingForDriver.value = false;
-        Get.snackbar('تعذر استلام العروض', 'حاول إرسال الطلب مرة أخرى.');
-      },
-      onDone: () {
-        offersStreamDone.value = true;
-        _updateOffersExhausted();
-      },
-    );
+        receivedOffersCount.value++;
+      } else {
+        driverOffers[index] = offer;
+      }
+      offersExhausted.value = false;
+    } else if (offer.status == DriverOfferStatus.accepted &&
+        int.tryParse('${payload['rideStatus']}') == 3) {
+      acceptedOffer.value = offer;
+      negotiationStatus.value = NegotiationStatus.accepted;
+      _offersDeadlineTimer?.cancel();
+      if (!isDriverAssigned.value) driverFound();
+    } else if (offer.status == DriverOfferStatus.rejected ||
+        offer.status == DriverOfferStatus.expired) {
+      _dismissOffer(offer.id);
+    }
   }
 
   Future<void> acceptOffer(DriverOffer offer) async {
@@ -847,7 +943,12 @@ class RideController extends GetxController {
     offersExhausted.value = offersStreamDone.value && driverOffers.isEmpty;
     if (offersExhausted.value) {
       _recipientTimer?.cancel();
+      _offersDeadlineTimer?.cancel();
       isSearchingForDriver.value = false;
+      if (Get.isRegistered<TrackingHubService>()) {
+        unawaited(Get.find<TrackingHubService>()
+            .setRideSubscriptions(const <int>{}));
+      }
     }
   }
 
@@ -866,6 +967,7 @@ class RideController extends GetxController {
     driverOffers.clear();
     requestRecipients.clear();
     _recipientTimer?.cancel();
+    _offersDeadlineTimer?.cancel();
     isSearchingForDriver.value = false;
     cancelRide('ألغى المستخدم البحث عن سائق');
   }
@@ -884,6 +986,7 @@ class RideController extends GetxController {
 
   void driverFound() {
     _recipientTimer?.cancel();
+    _offersDeadlineTimer?.cancel();
     isSearchingForDriver.value = false;
     isDriverAssigned.value = true;
     if (AppEnvironment.useDemoData) startDemoTracking();
@@ -892,8 +995,13 @@ class RideController extends GetxController {
 
   void cancelRide(String reason) {
     _recipientTimer?.cancel();
+    _offersDeadlineTimer?.cancel();
     cancellationReason.value = reason;
     isSearchingForDriver.value = false;
+    if (Get.isRegistered<TrackingHubService>()) {
+      unawaited(Get.find<TrackingHubService>()
+          .setRideSubscriptions(const <int>{}));
+    }
     Get.offNamed<void>(RideRoutes.requestThanks);
   }
 
@@ -916,9 +1024,11 @@ class RideController extends GetxController {
 
   @override
   void onClose() {
-    _offersSubscription?.cancel();
+    _hubEventSubscription?.cancel();
+    _hubConnectionSubscription?.cancel();
     _trackingTimer?.cancel();
     _recipientTimer?.cancel();
+    _offersDeadlineTimer?.cancel();
     _passengerPositionSubscription?.cancel();
     super.onClose();
   }

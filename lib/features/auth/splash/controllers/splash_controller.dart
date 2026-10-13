@@ -1,6 +1,8 @@
 import 'package:get/get.dart';
 import 'package:get_storage/get_storage.dart';
 
+import '../../../../core/services/auth_session_service.dart';
+import '../../../driver/driver_routes.dart';
 import '../../../ride/ride_routes.dart';
 import '../../routes/auth_routes.dart';
 
@@ -19,9 +21,17 @@ class SplashController extends GetxController {
     if (isClosed) return;
     final hasSeenOnboarding =
         _storage.read<bool>('has_seen_onboarding') ?? false;
+    final session = Get.find<AuthSessionService>();
+    if (session.hasPendingNotificationOpen) {
+      if (session.isAuthenticated.value) {
+        session.continueAfterAuthentication(fallbackRoute: DriverRoutes.home);
+      } else {
+        Get.offAllNamed<void>(DriverRoutes.login);
+      }
+      return;
+    }
     Get.offAllNamed<void>(
       hasSeenOnboarding ? RideRoutes.homeTransport : AuthRoutes.onboardingOne,
     );
   }
 }
-

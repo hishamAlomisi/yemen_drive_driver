@@ -1,11 +1,15 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 
 import '../../core/config/app_environment.dart';
 import '../../core/network/api_client.dart';
+import '../../core/realtime/tracking_hub_service.dart';
 import '../../core/services/auth_session_service.dart';
 import '../../core/services/connectivity_service.dart';
 import '../../core/services/locale_service.dart';
+import '../../core/services/push_notifications_service.dart';
 import '../../core/services/theme_service.dart';
 import '../../core/storage/secure_storage_service.dart';
 import '../../features/account/models/account_models.dart';
@@ -15,6 +19,12 @@ class InitialBinding extends Bindings {
   Future<void> dependencies() async {
     if (!Get.isRegistered<SecureStorageService>()) {
       Get.put<SecureStorageService>(SecureStorageService(), permanent: true);
+    }
+    if (!Get.isRegistered<TrackingHubService>()) {
+      Get.put<TrackingHubService>(
+        TrackingHubService(Get.find<SecureStorageService>()),
+        permanent: true,
+      );
     }
     if (!Get.isRegistered<ApiClient>()) {
       await Get.putAsync<ApiClient>(
@@ -30,6 +40,24 @@ class InitialBinding extends Bindings {
         ).init(),
         permanent: true,
       );
+    }
+    if (!Get.isRegistered<PushNotificationsService>()) {
+      await Get.putAsync<PushNotificationsService>(
+        () => PushNotificationsService(
+          Get.find<ApiClient>(),
+          Get.find<AuthSessionService>(),
+          Get.find<SecureStorageService>(),
+        ).init(),
+        permanent: true,
+      );
+    }
+    final push = Get.find<PushNotificationsService>();
+    final session = Get.find<AuthSessionService>();
+    session.onAuthenticated = push.onAuthenticated;
+    session.onSignedOut = push.onSignedOut;
+    session.onSessionEnded = push.onSessionEnded;
+    if (session.isAuthenticated.value) {
+      unawaited(push.onAuthenticated());
     }
     if (!Get.isRegistered<ThemeService>()) {
       await Get.putAsync<ThemeService>(

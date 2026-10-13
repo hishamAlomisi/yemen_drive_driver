@@ -1,4 +1,3 @@
-import 'dart:async';
 import '../../../../core/network/api_client.dart';
 import '../../../../core/network/api_models.dart';
 import '../../models/ride_models.dart';
@@ -12,15 +11,15 @@ abstract interface class RideNegotiationRepository {
   });
 
   Future<String> createRequest(RideRequestDraft draft);
-  Stream<DriverOffer> watchOffers(String requestId);
+  Future<Map<String, Object?>> getRideDetail(String requestId);
+  DriverOffer? mapRealtimeOffer(Map<String, Object?> event);
   Future<void> acceptOffer(String requestId, String offerId);
   Future<void> rejectOffer(String requestId, String offerId);
   Future<void> cancelRequest(String requestId);
 }
 
-/// REST implementation. The API returns the
-/// current ride snapshot, so offers are observed by lightweight polling until
-/// SignalR is enabled for the client.
+/// REST provides the initial/reconnect snapshot. New offer changes arrive over
+/// the authenticated Tracking Hub connection.
 class ApiRideNegotiationRepository implements RideNegotiationRepository {
   const ApiRideNegotiationRepository(this._client);
   final ApiClient _client;
@@ -87,31 +86,68 @@ class ApiRideNegotiationRepository implements RideNegotiationRepository {
   }
 
   @override
-  Stream<DriverOffer> watchOffers(String requestId) async* {
-    final seen = <String>{};
-    for (var i = 0; i < 60; i++) {
-      final result = await _client.execute<Object?>(
-          model: 'RideModel', operation: 'get', data: {'id': requestId});
-      final offers = result is ApiSuccess ? _map(result.data)['offers'] : null;
-      if (offers is List) {
-        for (final raw in offers.whereType<Map<Object?, Object?>>()) {
-          final item = Map<String, Object?>.from(raw);
-          final id = item['id']?.toString() ?? '';
-          if (id.isEmpty || !seen.add(id)) continue;
-          yield DriverOffer(
-            id: id,
-            driverName: item['driverName']?.toString() ?? '',
-            vehicleSummary: item['vehicleModel']?.toString() ?? '',
-            price: _number(item['amount']),
-            rating: 0,
-            etaMinutes: 0,
-            expiresAt:
-                DateTime.tryParse(item['expiresAtUtc']?.toString() ?? ''),
-          );
-        }
-      }
-      await Future<void>.delayed(const Duration(seconds: 2));
+  Future<Map<String, Object?>> getRideDetail(String requestId) async {
+    final result = await _client.execute<Object?>(
+      model: 'RideModel',
+      operation: 'get',
+      data: <String, Object?>{'id': requestId},
+    );
+    if (result is! ApiSuccess) {
+      throw const FormatException('تعذر تحديث حالة الرحلة من الخادم.');
     }
+    return _map(result.data);
+  }
+
+  @override
+  DriverOffer? mapRealtimeOffer(Map<String, Object?> item) {
+    final id = item['id']?.toString() ?? '';
+    if (id.isEmpty) return null;
+    return DriverOffer(
+      id: id,
+      driverName: item['driverName']?.toString() ?? '',
+      vehicleSummary: item['vehicleModel']?.toString() ?? '',
+      price: _number(item['amount']),
+      rating: 0,
+      etaMinutes: 0,
+      status: _offerStatus(item['status']),
+      expiresAt: _serverUtcDateTime(item['expiresAtUtc']),
+    );
+  }
+
+  DriverOfferStatus _offerStatus(Object? value) {
+    switch (value?.toString().toLowerCase()) {
+      case 'accepted':
+      case '1':
+        return DriverOfferStatus.accepted;
+      case 'rejected':
+      case '2':
+        return DriverOfferStatus.rejected;
+      case 'expired':
+      case '3':
+        return DriverOfferStatus.expired;
+      default:
+        return DriverOfferStatus.pending;
+    }
+  }
+
+  static DateTime? _serverUtcDateTime(Object? value) {
+    final text = value?.toString().trim() ?? '';
+    if (text.isEmpty) return null;
+    final parsed = DateTime.tryParse(text);
+    if (parsed == null) return null;
+    final hasOffset =
+        RegExp(r'(?:Z|[+-]\d{2}:?\d{2})$', caseSensitive: false).hasMatch(text);
+    if (hasOffset) return parsed.toUtc();
+    return DateTime.utc(
+      parsed.year,
+      parsed.month,
+      parsed.day,
+      parsed.hour,
+      parsed.minute,
+      parsed.second,
+      parsed.millisecond,
+      parsed.microsecond,
+    );
   }
 
   @override

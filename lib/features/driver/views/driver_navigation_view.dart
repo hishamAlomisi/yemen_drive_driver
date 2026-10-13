@@ -1,12 +1,17 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:get/get.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 import '../../../shared/widgets/app_google_map.dart';
+import '../controllers/driver_controller.dart';
 import '../../ride/location_selection/repositories/route_repository.dart';
 
 /// In-app navigation preview for the assigned driver's pickup or destination.
-/// It deliberately keeps the driver in YemenDrive; external Maps is not opened.
+/// GPS stays local for the driver's marker; SignalR publishes that same fix to
+/// the ride participants through the normal driver controller.
 class DriverNavigationView extends StatefulWidget {
   const DriverNavigationView({super.key});
 
@@ -18,66 +23,346 @@ class _DriverNavigationViewState extends State<DriverNavigationView> {
   late final LatLng _origin;
   late final LatLng _destination;
   late final String _title;
+  late final DriverController _driverController;
+  late final Worker _positionWorker;
   final _routeRepository = ApiRoutesRepository(Get.find());
-  Set<Polyline> _polylines = const <Polyline>{};
+
+  LatLng? _driverPosition;
+  LatLng? _cameraFollowTarget;
+  LatLng? _lastRouteOrigin;
+  DateTime? _lastRouteRequestedAt;
+  DateTime? _animationStartedAt;
+  LatLng? _animationFrom;
+  LatLng? _animationTarget;
+  Timer? _markerAnimationTimer;
+  List<LatLng> _routePoints = const <LatLng>[];
   bool _loading = true;
+  bool _routeRequestInFlight = false;
   String? _error;
-  int? _distanceMeters;
-  int? _durationSeconds;
+  String _nextInstruction = '';
+  String _nextManeuver = '';
+  double _bearing = 0;
+  int _distanceMeters = 0;
+  int _durationSeconds = 0;
+  int _nextStepDistanceMeters = 0;
 
   @override
   void initState() {
     super.initState();
-    final data = Map<Object?, Object?>.from((Get.arguments as Map?) ?? const <Object?, Object?>{});
-    _origin = LatLng(_number(data['originLatitude']), _number(data['originLongitude']));
-    _destination = LatLng(_number(data['destinationLatitude']), _number(data['destinationLongitude']));
+    final data = Map<Object?, Object?>.from(
+      (Get.arguments as Map?) ?? const <Object?, Object?>{},
+    );
+    _origin = LatLng(
+      _number(data['originLatitude']),
+      _number(data['originLongitude']),
+    );
+    _destination = LatLng(
+      _number(data['destinationLatitude']),
+      _number(data['destinationLongitude']),
+    );
     _title = '${data['title'] ?? 'مسار الرحلة'}';
-    _loadRoute();
+    _driverController = Get.find<DriverController>();
+    final initialPosition = _driverController.currentPosition.value;
+    _driverPosition = initialPosition == null
+        ? _origin
+        : LatLng(initialPosition.latitude, initialPosition.longitude);
+    _cameraFollowTarget = _driverPosition;
+    _positionWorker = ever<Position?>(
+      _driverController.currentPosition,
+      _handlePosition,
+    );
+    unawaited(_loadRoute(_driverPosition!, force: true));
   }
 
-  Future<void> _loadRoute() async {
-    setState(() { _loading = true; _error = null; });
+  void _handlePosition(Position? position) {
+    if (position == null ||
+        !position.accuracy.isFinite ||
+        position.accuracy <= 0 ||
+        position.accuracy > 75) {
+      return;
+    }
+
+    final target = LatLng(position.latitude, position.longitude);
+    final headingIsReliable = position.heading.isFinite &&
+        position.heading >= 0 &&
+        (position.speed.isFinite ? position.speed : 0) > 0.7;
+    setState(() {
+      if (headingIsReliable) _bearing = position.heading % 360;
+      _animateMarkerTo(target);
+      final previousCameraTarget = _cameraFollowTarget ?? _origin;
+      if (Geolocator.distanceBetween(
+            previousCameraTarget.latitude,
+            previousCameraTarget.longitude,
+            target.latitude,
+            target.longitude,
+          ) >=
+          150) {
+        _cameraFollowTarget = target;
+      }
+    });
+    unawaited(_loadRoute(target));
+  }
+
+  void _animateMarkerTo(LatLng target) {
+    _markerAnimationTimer?.cancel();
+    final start = _driverPosition ?? target;
+    _animationFrom = start;
+    _animationTarget = target;
+    _animationStartedAt = DateTime.now();
+    const duration = Duration(milliseconds: 1500);
+    _markerAnimationTimer = Timer.periodic(
+      const Duration(milliseconds: 40),
+      (timer) {
+        final from = _animationFrom;
+        final to = _animationTarget;
+        final startedAt = _animationStartedAt;
+        if (!mounted || from == null || to == null || startedAt == null) {
+          timer.cancel();
+          return;
+        }
+        final progress = (DateTime.now().difference(startedAt).inMilliseconds /
+                duration.inMilliseconds)
+            .clamp(0.0, 1.0);
+        setState(() {
+          _driverPosition = LatLng(
+            from.latitude + (to.latitude - from.latitude) * progress,
+            from.longitude + (to.longitude - from.longitude) * progress,
+          );
+        });
+        if (progress >= 1) {
+          timer.cancel();
+          _markerAnimationTimer = null;
+        }
+      },
+    );
+  }
+
+  Future<void> _loadRoute(LatLng origin, {bool force = false}) async {
+    if (_routeRequestInFlight) return;
+    final lastOrigin = _lastRouteOrigin;
+    final movedEnough = lastOrigin == null ||
+        Geolocator.distanceBetween(
+              lastOrigin.latitude,
+              lastOrigin.longitude,
+              origin.latitude,
+              origin.longitude,
+            ) >=
+            30;
+    final requestedRecently = _lastRouteRequestedAt != null &&
+        DateTime.now().difference(_lastRouteRequestedAt!) <
+            const Duration(seconds: 45);
+    if (!force && (!movedEnough || requestedRecently)) return;
+
+    _routeRequestInFlight = true;
+    if (_routePoints.isEmpty && mounted) setState(() => _loading = true);
     try {
-      final route = await _routeRepository.getDrivingRoute(origin: _origin, destination: _destination);
+      final route = await _routeRepository.getDrivingRoute(
+        origin: origin,
+        destination: _destination,
+        includeSteps: true,
+      );
       if (!mounted) return;
+      _lastRouteOrigin = origin;
+      _lastRouteRequestedAt = DateTime.now();
       setState(() {
+        _error = null;
+        _routePoints = route.points;
         _distanceMeters = route.distanceMeters;
         _durationSeconds = route.durationSeconds;
-        _polylines = <Polyline>{Polyline(polylineId: const PolylineId('driver-route'), points: route.points, color: Theme.of(context).colorScheme.primary, width: 6)};
+        final nextStep = route.steps.isEmpty ? null : route.steps.first;
+        _nextInstruction = nextStep?.instruction ?? '';
+        _nextManeuver = nextStep?.maneuver ?? '';
+        _nextStepDistanceMeters = nextStep?.distanceMeters ?? 0;
       });
     } catch (_) {
-      if (mounted) setState(() => _error = 'تعذر تحميل مسار القيادة الآن.');
+      if (mounted) setState(() => _error = 'تعذر تحديث مسار القيادة الآن.');
     } finally {
+      _routeRequestInFlight = false;
       if (mounted) setState(() => _loading = false);
     }
   }
 
+  List<LatLng> get _remainingRoutePoints {
+    final current = _driverPosition;
+    if (current == null || _routePoints.length < 2) return _routePoints;
+    var nearestIndex = 0;
+    var nearestMeters = double.infinity;
+    for (var index = 0; index < _routePoints.length; index++) {
+      final point = _routePoints[index];
+      final meters = Geolocator.distanceBetween(
+        current.latitude,
+        current.longitude,
+        point.latitude,
+        point.longitude,
+      );
+      if (meters < nearestMeters) {
+        nearestMeters = meters;
+        nearestIndex = index;
+      }
+    }
+    final nextIndex = (nearestIndex + 1).clamp(0, _routePoints.length - 1);
+    return <LatLng>[current, ..._routePoints.skip(nextIndex)];
+  }
+
+  int get _remainingDistanceMeters {
+    final points = _remainingRoutePoints;
+    if (points.length < 2) return _distanceMeters;
+    var distance = 0.0;
+    for (var index = 1; index < points.length; index++) {
+      distance += Geolocator.distanceBetween(
+        points[index - 1].latitude,
+        points[index - 1].longitude,
+        points[index].latitude,
+        points[index].longitude,
+      );
+    }
+    return distance.round();
+  }
+
+  int get _remainingDurationSeconds {
+    if (_distanceMeters <= 0) return _durationSeconds;
+    return (_durationSeconds * _remainingDistanceMeters / _distanceMeters).round();
+  }
+
+  Set<Marker> get _markers => <Marker>{
+        if (_driverPosition != null)
+          Marker(
+            markerId: const MarkerId('driver'),
+            position: _driverPosition!,
+            rotation: _bearing,
+            flat: true,
+            anchor: const Offset(0.5, 0.5),
+            icon: BitmapDescriptor.defaultMarkerWithHue(
+              BitmapDescriptor.hueAzure,
+            ),
+            infoWindow: const InfoWindow(title: 'موقعك'),
+          ),
+        Marker(
+          markerId: const MarkerId('target'),
+          position: _destination,
+          infoWindow: InfoWindow(title: _title),
+        ),
+      };
+
+  Set<Polyline> get _currentPolylines {
+    final points = _remainingRoutePoints;
+    if (points.length < 2) return const <Polyline>{};
+    return <Polyline>{
+      Polyline(
+        polylineId: const PolylineId('driver-route'),
+        points: points,
+        color: Theme.of(context).colorScheme.primary,
+        width: 6,
+      ),
+    };
+  }
+
   @override
   Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(title: Text(_title)),
-    body: Stack(children: [
-      AppGoogleMap(
-        initialTarget: _destination,
-        initialZoom: 14,
-        myLocationEnabled: true,
-        showDemoMarker: false,
-        markers: <Marker>{
-          Marker(markerId: const MarkerId('driver'), position: _origin, icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueAzure), infoWindow: const InfoWindow(title: 'موقعك')),
-          Marker(markerId: const MarkerId('target'), position: _destination, infoWindow: InfoWindow(title: _title)),
-        },
-        polylines: _polylines,
-      ),
-      Positioned(
-        right: 16, left: 16, bottom: 20,
-        child: Card(child: Padding(
-          padding: const EdgeInsets.all(14),
-          child: _loading ? const Row(children: [CircularProgressIndicator(), SizedBox(width: 12), Text('جارٍ حساب المسار…')])
-              : _error != null ? Row(children: [Expanded(child: Text(_error!)), TextButton(onPressed: _loadRoute, child: const Text('إعادة المحاولة'))])
-              : Row(children: [const Icon(Icons.route_rounded), const SizedBox(width: 10), Expanded(child: Text('${(_distanceMeters! / 1000).toStringAsFixed(1)} كم · ${(_durationSeconds! / 60).ceil()} دقيقة', style: const TextStyle(fontWeight: FontWeight.bold)))]),
-        )),
-      ),
-    ]),
-  );
+        appBar: AppBar(title: Text(_title)),
+        body: Stack(
+          children: <Widget>[
+            AppGoogleMap(
+              initialTarget: _driverPosition ?? _destination,
+              initialZoom: 15,
+              followTarget: _cameraFollowTarget,
+              myLocationEnabled: true,
+              showDemoMarker: false,
+              markers: _markers,
+              polylines: _currentPolylines,
+            ),
+            Positioned(
+              right: 16,
+              left: 16,
+              bottom: 20,
+              child: Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(14),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: <Widget>[
+                      Row(
+                        children: <Widget>[
+                          const Icon(Icons.route_rounded),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: _loading && _distanceMeters == 0
+                                ? const Text('جارٍ حساب المسار…')
+                                : Text(
+                                    '${(_remainingDistanceMeters / 1000).toStringAsFixed(1)} كم · ${(_remainingDurationSeconds / 60).ceil()} دقيقة',
+                                    style: const TextStyle(
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                          ),
+                          if (_loading && _distanceMeters > 0)
+                            const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                              ),
+                            ),
+                        ],
+                      ),
+                      if (_nextInstruction.isNotEmpty) ...<Widget>[
+                        const SizedBox(height: 8),
+                        Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: <Widget>[
+                            Icon(_maneuverIcon(_nextManeuver), size: 20),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                '${_nextStepDistanceMeters > 0 ? 'بعد $_nextStepDistanceMeters م: ' : ''}$_nextInstruction',
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                      if (_error != null) ...<Widget>[
+                        const SizedBox(height: 6),
+                        Text(
+                          _error!,
+                          style: TextStyle(
+                            color: Theme.of(context).colorScheme.error,
+                          ),
+                        ),
+                        TextButton(
+                          onPressed: () => _loadRoute(
+                            _driverPosition ?? _origin,
+                            force: true,
+                          ),
+                          child: const Text('إعادة المحاولة'),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
 
-  double _number(Object? value) => value is num ? value.toDouble() : double.tryParse('${value ?? ''}') ?? 0;
+  IconData _maneuverIcon(String maneuver) {
+    final value = maneuver.toUpperCase();
+    if (value.contains('LEFT')) return Icons.turn_left_rounded;
+    if (value.contains('RIGHT')) return Icons.turn_right_rounded;
+    if (value.contains('UTURN')) return Icons.u_turn_left_rounded;
+    return Icons.straight_rounded;
+  }
+
+  double _number(Object? value) =>
+      value is num ? value.toDouble() : double.tryParse('${value ?? ''}') ?? 0;
+
+  @override
+  void dispose() {
+    _positionWorker.dispose();
+    _markerAnimationTimer?.cancel();
+    super.dispose();
+  }
 }

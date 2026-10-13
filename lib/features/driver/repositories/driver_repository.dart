@@ -9,14 +9,11 @@ abstract interface class DriverRepository {
       required String challengeId,
       required String deviceId});
   Future<DriverSnapshot> load(int? userId);
+  Future<bool> isRidePaymentCompleted(int rideId);
   Future<void> sendOffer(
       {required int rideId, required int driverId, required num amount});
   Future<void> updateRideStatus(
       {required int rideId, required int status, bool? customerPaymentEnabled});
-  Future<void> updateLocation(
-      {required int driverId,
-      required double latitude,
-      required double longitude});
   Future<Map<String, Object?>> registerCashPayment(
       {required int rideId, required num cashReceived});
   Future<Map<String, Object?>> getCashCollectionApproval(int approvalId);
@@ -30,6 +27,7 @@ abstract interface class DriverRepository {
     String? note,
   });
   Future<List<Map<String, Object?>>> notifications();
+  Future<void> markNotificationRead(int notificationId);
 }
 
 class ApiDriverRepository implements DriverRepository {
@@ -78,6 +76,22 @@ class ApiDriverRepository implements DriverRepository {
   }
 
   @override
+  Future<bool> isRidePaymentCompleted(int rideId) async {
+    final detail = await _provider.executeData(
+      'RideModel',
+      'get',
+      <String, Object?>{'id': rideId},
+    );
+    final payments = detail['payments'];
+    return payments is List &&
+        payments.any((raw) {
+          if (raw is! Map) return false;
+          final status = '${raw['status'] ?? ''}'.toLowerCase();
+          return status == '2' || status == 'paid';
+        });
+  }
+
+  @override
   Future<void> sendOffer(
           {required int rideId, required int driverId, required num amount}) =>
       _provider.execute('RideOfferModel', 'add', <String, Object?>{
@@ -97,18 +111,6 @@ class ApiDriverRepository implements DriverRepository {
         'status': status,
         if (customerPaymentEnabled != null)
           'customerPaymentEnabled': customerPaymentEnabled
-      });
-
-  @override
-  Future<void> updateLocation(
-          {required int driverId,
-          required double latitude,
-          required double longitude}) =>
-      _provider.execute('DriverLocationModel', 'update', <String, Object?>{
-        'driverId': driverId,
-        'latitude': latitude,
-        'longitude': longitude,
-        'isOnline': true
       });
 
   @override
@@ -157,4 +159,11 @@ class ApiDriverRepository implements DriverRepository {
   @override
   Future<List<Map<String, Object?>>> notifications() =>
       _provider.list('NotificationModel');
+
+  @override
+  Future<void> markNotificationRead(int notificationId) =>
+      _provider.execute('NotificationModel', 'update', <String, Object?>{
+        'id': notificationId,
+        'isRead': true,
+      });
 }
