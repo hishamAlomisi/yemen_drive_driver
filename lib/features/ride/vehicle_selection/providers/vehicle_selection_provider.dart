@@ -1,2 +1,0 @@
-export '../repositories/service_catalog_repository.dart';
-

@@ -65,20 +65,18 @@ class CompleteProfileScreen extends GetView<RegistrationController> {
                     textInputAction: TextInputAction.next,
                   ),
                   const SizedBox(height: AppSpacing.sm),
-                  AuthDropdownField(
-                    hint: 'select_city'.tr,
-                    items: controller.cities,
-                    value: controller.selectedCity.value,
-                    onChanged: controller.selectCity,
+                  AppTextField(
+                    controller: controller.cityController,
+                    hint: 'city'.tr,
                     validator: AppValidators.required,
+                    textInputAction: TextInputAction.next,
                   ),
                   const SizedBox(height: AppSpacing.sm),
-                  AuthDropdownField(
-                    hint: 'select_district'.tr,
-                    items: controller.districts,
-                    value: controller.selectedDistrict.value,
-                    onChanged: controller.selectDistrict,
+                  AppTextField(
+                    controller: controller.districtController,
+                    hint: 'district'.tr,
                     validator: AppValidators.required,
+                    textInputAction: TextInputAction.done,
                   ),
                 ],
               ),

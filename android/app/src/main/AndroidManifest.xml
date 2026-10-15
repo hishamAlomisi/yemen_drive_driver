@@ -6,6 +6,10 @@
     <!-- Location permissions. Request them at runtime only when needed. -->
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <!-- Required to keep the driver's existing live-location stream active in the background. -->
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
 
     <!-- Android 13+ notification permission; it must also be requested at runtime. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />

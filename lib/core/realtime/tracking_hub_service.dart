@@ -191,6 +191,7 @@ class TrackingHubService extends GetxService {
       'cashApprovalUpdated',
       'notificationCreated',
       'driverLocationUpdated',
+      'passengerLocationUpdated',
       'nearbyDriverLocationUpdated',
       'nearbyDriverAvailabilityChanged',
     ]) {

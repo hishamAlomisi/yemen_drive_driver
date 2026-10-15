@@ -7,7 +7,7 @@ import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 import '../../../shared/widgets/app_google_map.dart';
 import '../controllers/driver_controller.dart';
-import '../../ride/location_selection/repositories/route_repository.dart';
+import '../repositories/route_repository.dart';
 
 /// In-app navigation preview for the assigned driver's pickup or destination.
 /// GPS stays local for the driver's marker; SignalR publishes that same fix to
@@ -23,11 +23,14 @@ class _DriverNavigationViewState extends State<DriverNavigationView> {
   late final LatLng _origin;
   late final LatLng _destination;
   late final String _title;
+  late final int? _rideId;
   late final DriverController _driverController;
   late final Worker _positionWorker;
+  late final Worker _passengerLocationWorker;
   final _routeRepository = ApiRoutesRepository(Get.find());
 
   LatLng? _driverPosition;
+  LatLng? _passengerPosition;
   LatLng? _cameraFollowTarget;
   LatLng? _lastRouteOrigin;
   DateTime? _lastRouteRequestedAt;
@@ -42,6 +45,7 @@ class _DriverNavigationViewState extends State<DriverNavigationView> {
   String _nextInstruction = '';
   String _nextManeuver = '';
   double _bearing = 0;
+  double? _passengerBearing;
   int _distanceMeters = 0;
   int _durationSeconds = 0;
   int _nextStepDistanceMeters = 0;
@@ -61,6 +65,7 @@ class _DriverNavigationViewState extends State<DriverNavigationView> {
       _number(data['destinationLongitude']),
     );
     _title = '${data['title'] ?? 'مسار الرحلة'}';
+    _rideId = int.tryParse('${data['rideId'] ?? ''}');
     _driverController = Get.find<DriverController>();
     final initialPosition = _driverController.currentPosition.value;
     _driverPosition = initialPosition == null
@@ -71,7 +76,35 @@ class _DriverNavigationViewState extends State<DriverNavigationView> {
       _driverController.currentPosition,
       _handlePosition,
     );
+    final rideId = _rideId;
+    _setPassengerPosition(
+      rideId == null
+          ? null
+          : _driverController.passengerLocationForRide(rideId),
+    );
+    _passengerLocationWorker = ever(
+      _driverController.passengerLocationsByRideId,
+      (_) => _syncPassengerPosition(),
+    );
     unawaited(_loadRoute(_driverPosition!, force: true));
+  }
+
+  void _syncPassengerPosition() {
+    if (!mounted) return;
+    final rideId = _rideId;
+    setState(() {
+      _setPassengerPosition(
+        rideId == null
+            ? null
+            : _driverController.passengerLocationForRide(rideId),
+      );
+    });
+  }
+
+  void _setPassengerPosition(PassengerLocationUpdate? location) {
+    _passengerPosition =
+        location == null ? null : LatLng(location.latitude, location.longitude);
+    _passengerBearing = location?.bearing;
   }
 
   void _handlePosition(Position? position) {
@@ -221,7 +254,8 @@ class _DriverNavigationViewState extends State<DriverNavigationView> {
 
   int get _remainingDurationSeconds {
     if (_distanceMeters <= 0) return _durationSeconds;
-    return (_durationSeconds * _remainingDistanceMeters / _distanceMeters).round();
+    return (_durationSeconds * _remainingDistanceMeters / _distanceMeters)
+        .round();
   }
 
   Set<Marker> get _markers => <Marker>{
@@ -236,6 +270,18 @@ class _DriverNavigationViewState extends State<DriverNavigationView> {
               BitmapDescriptor.hueAzure,
             ),
             infoWindow: const InfoWindow(title: 'موقعك'),
+          ),
+        if (_passengerPosition != null)
+          Marker(
+            markerId: MarkerId('passenger-${_rideId ?? 'current'}'),
+            position: _passengerPosition!,
+            rotation: _passengerBearing ?? 0,
+            flat: _passengerBearing != null,
+            anchor: const Offset(0.5, 0.5),
+            icon: BitmapDescriptor.defaultMarkerWithHue(
+              BitmapDescriptor.hueRed,
+            ),
+            infoWindow: const InfoWindow(title: 'موقع الراكب المباشر'),
           ),
         Marker(
           markerId: const MarkerId('target'),
@@ -267,7 +313,6 @@ class _DriverNavigationViewState extends State<DriverNavigationView> {
               initialZoom: 15,
               followTarget: _cameraFollowTarget,
               myLocationEnabled: true,
-              showDemoMarker: false,
               markers: _markers,
               polylines: _currentPolylines,
             ),
@@ -362,6 +407,7 @@ class _DriverNavigationViewState extends State<DriverNavigationView> {
   @override
   void dispose() {
     _positionWorker.dispose();
+    _passengerLocationWorker.dispose();
     _markerAnimationTimer?.cancel();
     super.dispose();
   }

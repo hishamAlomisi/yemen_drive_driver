@@ -1,7 +1,7 @@
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 
-import '../../../../core/network/api_client.dart';
-import '../../../../core/network/api_models.dart';
+import '../../../core/network/api_client.dart';
+import '../../../core/network/api_models.dart';
 
 abstract interface class RouteRepository {
   Future<DrivingRoute> getDrivingRoute({

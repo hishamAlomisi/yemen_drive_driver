@@ -3,7 +3,6 @@ import 'package:get_storage/get_storage.dart';
 
 import '../../../../core/services/auth_session_service.dart';
 import '../../../driver/driver_routes.dart';
-import '../../../ride/ride_routes.dart';
 import '../../routes/auth_routes.dart';
 
 class SplashController extends GetxController {
@@ -30,8 +29,12 @@ class SplashController extends GetxController {
       }
       return;
     }
+    if (!hasSeenOnboarding) {
+      Get.offAllNamed<void>(AuthRoutes.onboardingOne);
+      return;
+    }
     Get.offAllNamed<void>(
-      hasSeenOnboarding ? RideRoutes.homeTransport : AuthRoutes.onboardingOne,
+      session.isAuthenticated.value ? DriverRoutes.home : DriverRoutes.login,
     );
   }
 }

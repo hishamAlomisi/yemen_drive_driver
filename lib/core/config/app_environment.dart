@@ -1,39 +1,19 @@
-import '../../features/account/models/account_models.dart';
-
 class AppEnvironment {
   AppEnvironment._();
 
-  static late final String flavor;
   static late final String baseUrl;
   static String defaultCurrency = 'ر.ي';
-  static bool useDemoData = true;
-  static String googleMapsApiKey = '';
-  static String androidPackageName = 'com.example.yemen_drive_driver';
-  static String androidCertSha1 = '';
   static String signalRHubUrl = '';
   static bool _isConfigured = false;
 
   static bool get isConfigured => _isConfigured;
-  static bool get isProduction => flavor == 'prod';
-  static List<PaymentMethodItem> paymentMethods = <PaymentMethodItem>[];
-
   static void configure({
-    required String flavor,
     required String baseUrl,
-    bool useDemoData = true,
-    String googleMapsApiKey = '',
-    String androidPackageName = 'com.example.yemen_drive_driver',
-    String androidCertSha1 = '',
     String signalRHubUrl = '',
   }) {
-    AppEnvironment.flavor = flavor;
     AppEnvironment.baseUrl = baseUrl.endsWith('/')
         ? baseUrl.substring(0, baseUrl.length - 1)
         : baseUrl;
-    AppEnvironment.useDemoData = useDemoData;
-    AppEnvironment.googleMapsApiKey = googleMapsApiKey;
-    AppEnvironment.androidPackageName = androidPackageName;
-    AppEnvironment.androidCertSha1 = androidCertSha1.replaceAll(':', '');
     AppEnvironment.signalRHubUrl = signalRHubUrl.isEmpty
         ? _defaultSignalRHubUrl(AppEnvironment.baseUrl)
         : signalRHubUrl;

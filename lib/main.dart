@@ -10,32 +10,10 @@ Future<void> main() async {
   if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
     await Firebase.initializeApp();
   }
-  //await GetStorage.init();
   AppEnvironment.configure(
-    flavor: const String.fromEnvironment('FLAVOR', defaultValue: 'dev'),
     baseUrl: const String.fromEnvironment(
       'API_BASE_URL',
-      // Android emulator reaches the local ASP.NET profile through 10.0.2.2.
-      // Override with --dart-define=API_BASE_URL=... for a device or server.
-      // Android emulator maps the host machine to 10.0.2.2. Keep this as the
-      // development default; physical devices should override it with the
-      // host LAN address using --dart-define=API_BASE_URL=...
-      defaultValue: 'http://10.0.2.2:5080/api',
-    ),
-    useDemoData: const bool.fromEnvironment(
-      'USE_DEMO_DATA',
-      defaultValue: false,
-    ),
-    googleMapsApiKey: const String.fromEnvironment(
-      'GOOGLE_MAPS_API_KEY',
-    ),
-    androidPackageName: const String.fromEnvironment(
-      'ANDROID_PACKAGE_NAME',
-      defaultValue: '',
-    ),
-    androidCertSha1: const String.fromEnvironment(
-      'ANDROID_CERT_SHA1',
-      defaultValue: '',
+      defaultValue: 'http://192.168.89.72:5080/api',
     ),
     signalRHubUrl: const String.fromEnvironment('SIGNALR_HUB_URL'),
   );

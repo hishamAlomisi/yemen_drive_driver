@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart'
+    show TargetPlatform, defaultTargetPlatform, kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:get/get.dart';
@@ -11,6 +13,24 @@ import '../../../core/services/auth_session_service.dart';
 import '../driver_routes.dart';
 import '../repositories/driver_repository.dart';
 import '../views/driver_payment_view.dart';
+
+/// The latest verified passenger GPS sample for one assigned ride.
+///
+/// This exists only in memory while the driver is handling the ride. The
+/// public ride-sharing flow never reads this value.
+class PassengerLocationUpdate {
+  const PassengerLocationUpdate({
+    required this.latitude,
+    required this.longitude,
+    required this.observedAtUtc,
+    this.bearing,
+  });
+
+  final double latitude;
+  final double longitude;
+  final double? bearing;
+  final DateTime observedAtUtc;
+}
 
 class DriverController extends GetxController {
   DriverController(this._repository, this._session);
@@ -37,8 +57,10 @@ class DriverController extends GetxController {
   final RxBool financialFiltersVisible = false.obs;
   final RxnInt focusedRideId = RxnInt();
   final paymentEnabledRideIds = <int>{};
+  final passengerLocationsByRideId = <int, PassengerLocationUpdate>{}.obs;
   final Set<int> _paymentChecksInFlight = <int>{};
   StreamSubscription<Position>? _locationSubscription;
+  bool _locationPermissionNoticeShown = false;
   StreamSubscription<TrackingHubEvent>? _hubEventSubscription;
   StreamSubscription<void>? _hubConnectionSubscription;
   bool _refreshInFlight = false;
@@ -49,7 +71,12 @@ class DriverController extends GetxController {
   DateTime? _lastLocationSentAt;
   Position? _lastSentPosition;
 
+  static const _trackableRideStatuses = <int>{3, 4, 5, 8};
+
   int? get currentUserId => _session.currentUserId.value;
+
+  PassengerLocationUpdate? passengerLocationForRide(int rideId) =>
+      passengerLocationsByRideId[rideId];
 
   @override
   void onReady() {
@@ -168,6 +195,11 @@ class DriverController extends GetxController {
     final rideId = int.tryParse('${payload['id'] ?? payload['rideId'] ?? ''}');
     if (rideId == null) return;
 
+    if (event.name == 'passengerLocationUpdated') {
+      _applyPassengerLocationUpdate(rideId, payload);
+      return;
+    }
+
     if (event.name == 'rideAvailable') {
       _upsertRide(payload, rideId);
       return;
@@ -194,6 +226,9 @@ class DriverController extends GetxController {
         updatedRide['customerPaymentEnabled'] =
             payload['customerPaymentEnabled'] == true;
         rides[index] = updatedRide;
+        if (!_trackableRideStatuses.contains(rideStatus)) {
+          passengerLocationsByRideId.remove(rideId);
+        }
         _syncActiveRideSubscriptions();
       }
       return;
@@ -228,6 +263,65 @@ class DriverController extends GetxController {
     rides[index] = updatedRide;
   }
 
+  void _applyPassengerLocationUpdate(
+    int rideId,
+    Map<String, Object?> payload,
+  ) {
+    final ride = rides
+        .where((item) => int.tryParse('${item['id']}') == rideId)
+        .firstOrNull;
+    if (ride == null || !_isTrackableDriverRide(ride)) return;
+
+    final latitude = _finiteNumber(payload['latitude']);
+    final longitude = _finiteNumber(payload['longitude']);
+    final observedAt =
+        DateTime.tryParse('${payload['observedAtUtc'] ?? ''}')?.toUtc();
+    if (latitude == null ||
+        longitude == null ||
+        observedAt == null ||
+        latitude < -90 ||
+        latitude > 90 ||
+        longitude < -180 ||
+        longitude > 180) {
+      return;
+    }
+
+    final bearing = _finiteNumber(payload['bearing']);
+    final previous = passengerLocationsByRideId[rideId];
+    if (previous != null && !observedAt.isAfter(previous.observedAtUtc)) return;
+
+    passengerLocationsByRideId[rideId] = PassengerLocationUpdate(
+      latitude: latitude,
+      longitude: longitude,
+      bearing:
+          bearing != null && bearing >= 0 && bearing < 360 ? bearing : null,
+      observedAtUtc: observedAt,
+    );
+  }
+
+  bool _isTrackableDriverRide(Map<String, Object?> ride) =>
+      ride['driverId']?.toString() == currentUserId?.toString() &&
+      _trackableRideStatuses.contains(int.tryParse('${ride['status']}'));
+
+  void _prunePassengerLocations() {
+    final activeRideIds = rides
+        .where(_isTrackableDriverRide)
+        .map((ride) => int.tryParse('${ride['id']}'))
+        .whereType<int>()
+        .toSet();
+    final staleRideIds = passengerLocationsByRideId.keys
+        .where((rideId) => !activeRideIds.contains(rideId))
+        .toList(growable: false);
+    for (final rideId in staleRideIds) {
+      passengerLocationsByRideId.remove(rideId);
+    }
+  }
+
+  double? _finiteNumber(Object? value) {
+    final parsed = value is num ? value.toDouble() : double.tryParse('$value');
+    return parsed != null && parsed.isFinite ? parsed : null;
+  }
+
   void _upsertRide(Map<String, Object?> ride, int rideId) {
     final index =
         rides.indexWhere((item) => int.tryParse('${item['id']}') == rideId);
@@ -239,13 +333,10 @@ class DriverController extends GetxController {
   }
 
   void _syncActiveRideSubscriptions() {
+    _prunePassengerLocations();
     if (!Get.isRegistered<TrackingHubService>()) return;
     final rideIds = rides
-        .where(
-          (ride) =>
-              ride['driverId']?.toString() == currentUserId?.toString() &&
-              <int>{3, 4, 5, 8}.contains(int.tryParse('${ride['status']}')),
-        )
+        .where(_isTrackableDriverRide)
         .map((ride) => int.tryParse('${ride['id']}'))
         .whereType<int>();
     unawaited(Get.find<TrackingHubService>().setRideSubscriptions(rideIds));
@@ -262,6 +353,7 @@ class DriverController extends GetxController {
       final snapshot = await _repository.load(_session.currentUserId.value);
       profile.value = snapshot.profile;
       rides.assignAll(snapshot.rides);
+      _prunePassengerLocations();
       paymentEnabledRideIds
         ..clear()
         ..addAll(snapshot.rides
@@ -275,7 +367,9 @@ class DriverController extends GetxController {
             (ride) =>
                 ride['driverId']?.toString() ==
                     _session.currentUserId.value?.toString() &&
-                <int>{3, 4, 5, 8}.contains(int.tryParse('${ride['status']}')),
+                _trackableRideStatuses.contains(
+                  int.tryParse('${ride['status']}'),
+                ),
           )
           .map((ride) => int.tryParse('${ride['id']}'))
           .whereType<int>();
@@ -507,6 +601,7 @@ class DriverController extends GetxController {
     }
     await Get.toNamed<void>(DriverRoutes.navigation,
         arguments: <String, Object?>{
+          'rideId': int.tryParse('${ride['id']}'),
           'originLatitude': _number(ride['driverLatitude']),
           'originLongitude': _number(ride['driverLongitude']),
           'destinationLatitude': lat,
@@ -542,10 +637,7 @@ class DriverController extends GetxController {
       await _publishLocation(current);
       await _locationSubscription?.cancel();
       _locationSubscription = Geolocator.getPositionStream(
-        locationSettings: const LocationSettings(
-          accuracy: LocationAccuracy.bestForNavigation,
-          distanceFilter: 5,
-        ),
+        locationSettings: _driverLocationStreamSettings(),
       ).listen(
         (position) => unawaited(_publishLocation(position)),
         onError: (_) {},
@@ -553,6 +645,28 @@ class DriverController extends GetxController {
     } catch (_) {
       // The driver can still retry explicitly with the location button.
     }
+  }
+
+  LocationSettings _driverLocationStreamSettings() {
+    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
+      return AndroidSettings(
+        accuracy: LocationAccuracy.bestForNavigation,
+        distanceFilter: 5,
+        intervalDuration: const Duration(seconds: 3),
+        foregroundNotificationConfig: const ForegroundNotificationConfig(
+          notificationTitle: 'سائق يمن درايف يتتبع موقعك',
+          notificationText: 'يستمر تحديث موقعك لإظهاره للركاب أثناء العمل.',
+          notificationChannelName: 'تتبع موقع السائق',
+          notificationIcon: AndroidResource(name: 'ic_stat_yemendrive'),
+          setOngoing: true,
+        ),
+      );
+    }
+
+    return const LocationSettings(
+      accuracy: LocationAccuracy.bestForNavigation,
+      distanceFilter: 5,
+    );
   }
 
   Future<bool> _ensureLocationAccess({bool showMessage = false}) async {
@@ -571,10 +685,21 @@ class DriverController extends GetxController {
       if (showMessage) {
         Get.snackbar('صلاحية الموقع مطلوبة',
             'امنح تطبيق السائق صلاحية الموقع لتحديث موقعك الحقيقي.');
+      } else {
+        _showDriverLocationPermissionNotice(permission);
       }
       return false;
     }
     return true;
+  }
+
+  void _showDriverLocationPermissionNotice(LocationPermission permission) {
+    if (_locationPermissionNoticeShown || isClosed) return;
+    _locationPermissionNoticeShown = true;
+    final message = permission == LocationPermission.deniedForever
+        ? 'لن يتم إرسال موقعك لأن صلاحية الموقع غير متاحة.'
+        : 'لم تُمنح صلاحية الموقع، لذلك لن يتم إرسال موقعك للركاب.';
+    Get.snackbar('تتبع الموقع غير مفعل', message);
   }
 
   Future<void> _publishLocation(
@@ -920,6 +1045,7 @@ class DriverController extends GetxController {
     _locationSubscription?.cancel();
     _hubEventSubscription?.cancel();
     _hubConnectionSubscription?.cancel();
+    passengerLocationsByRideId.clear();
     if (Get.isRegistered<TrackingHubService>()) {
       unawaited(
         Get.find<TrackingHubService>().setUserEventListening(this, false),

@@ -1,10 +1,6 @@
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
-
-import '../../core/config/app_environment.dart';
-import 'map_backdrop.dart';
 
 class AppGoogleMap extends StatefulWidget {
   const AppGoogleMap({
@@ -24,8 +20,6 @@ class AppGoogleMap extends StatefulWidget {
     this.onTap,
     this.lightStyle,
     this.darkStyle,
-    this.showDemoMarker = true,
-    this.showDemoRoute = false,
     super.key,
   });
 
@@ -45,8 +39,6 @@ class AppGoogleMap extends StatefulWidget {
   final ArgumentCallback<LatLng>? onTap;
   final String? lightStyle;
   final String? darkStyle;
-  final bool showDemoMarker;
-  final bool showDemoRoute;
 
   @override
   State<AppGoogleMap> createState() => _AppGoogleMapState();
@@ -67,18 +59,6 @@ class _AppGoogleMapState extends State<AppGoogleMap> {
 
   @override
   Widget build(BuildContext context) {
-    // Android and iOS receive the key through their native configuration.
-    // Web needs its JavaScript API key during web bootstrap.
-    if (kIsWeb && AppEnvironment.googleMapsApiKey.isEmpty) {
-      return SizedBox(
-        width: widget.width,
-        height: widget.height,
-        child: MapBackdrop(
-          showMarker: widget.showDemoMarker,
-          showRoute: widget.showDemoRoute,
-        ),
-      );
-    }
     final isDark = Theme.of(context).brightness == Brightness.dark;
     return SizedBox(
       width: widget.width,
@@ -141,4 +121,3 @@ class _AppGoogleMapState extends State<AppGoogleMap> {
     super.dispose();
   }
 }
-

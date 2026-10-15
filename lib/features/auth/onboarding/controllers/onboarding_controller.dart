@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 import 'package:get_storage/get_storage.dart';
-import '../../../ride/ride_routes.dart';
+import '../../../driver/driver_routes.dart';
 import '../../models/auth_models.dart';
 
 class OnboardingController extends GetxController {
@@ -49,7 +49,7 @@ class OnboardingController extends GetxController {
 
   Future<void> finish() async {
     await _storage.write('has_seen_onboarding', true);
-    Get.offAllNamed<void>(RideRoutes.homeTransport);
+    Get.offAllNamed<void>(DriverRoutes.login);
   }
 
   @override
@@ -58,4 +58,3 @@ class OnboardingController extends GetxController {
     super.onClose();
   }
 }
-
