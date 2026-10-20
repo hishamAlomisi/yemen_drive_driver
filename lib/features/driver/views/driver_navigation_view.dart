@@ -6,8 +6,11 @@ import 'package:get/get.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 import '../../../shared/widgets/app_google_map.dart';
+import '../../../shared/widgets/ride_waiting_panel.dart';
+import '../../../shared/widgets/ride_route_change_panel.dart';
 import '../controllers/driver_controller.dart';
 import '../repositories/route_repository.dart';
+import '../widgets/driver_route_destination_picker.dart';
 
 /// In-app navigation preview for the assigned driver's pickup or destination.
 /// GPS stays local for the driver's marker; SignalR publishes that same fix to
@@ -21,12 +24,14 @@ class DriverNavigationView extends StatefulWidget {
 
 class _DriverNavigationViewState extends State<DriverNavigationView> {
   late final LatLng _origin;
-  late final LatLng _destination;
+  late LatLng _destination;
   late final String _title;
+  late final bool _followsDestination;
   late final int? _rideId;
   late final DriverController _driverController;
   late final Worker _positionWorker;
   late final Worker _passengerLocationWorker;
+  late final Worker _rideWorker;
   final _routeRepository = ApiRoutesRepository(Get.find());
 
   LatLng? _driverPosition;
@@ -41,6 +46,10 @@ class _DriverNavigationViewState extends State<DriverNavigationView> {
   List<LatLng> _routePoints = const <LatLng>[];
   bool _loading = true;
   bool _routeRequestInFlight = false;
+  bool _routeReloadRequested = false;
+  int _routeGeneration = 0;
+  int _routeVersion = 0;
+  Map<String, Object?>? _ride;
   String? _error;
   String _nextInstruction = '';
   String _nextManeuver = '';
@@ -65,6 +74,7 @@ class _DriverNavigationViewState extends State<DriverNavigationView> {
       _number(data['destinationLongitude']),
     );
     _title = '${data['title'] ?? 'مسار الرحلة'}';
+    _followsDestination = data['followsDestination'] == true;
     _rideId = int.tryParse('${data['rideId'] ?? ''}');
     _driverController = Get.find<DriverController>();
     final initialPosition = _driverController.currentPosition.value;
@@ -86,7 +96,52 @@ class _DriverNavigationViewState extends State<DriverNavigationView> {
       _driverController.passengerLocationsByRideId,
       (_) => _syncPassengerPosition(),
     );
+    _rideWorker = ever(_driverController.rides, (_) => _syncRide());
+    _syncRide();
+    if (rideId != null) {
+      unawaited(
+          _driverController.refreshRide(rideId).catchError((Object _) {}));
+    }
     unawaited(_loadRoute(_driverPosition!, force: true));
+  }
+
+  void _syncRide() {
+    if (!mounted || _rideId == null) return;
+    final ride = _driverController.rides
+        .where((item) => '${item['id']}' == '$_rideId')
+        .firstOrNull;
+    if (ride == null) return;
+    final latitude = double.tryParse('${ride['destinationLatitude']}');
+    final longitude = double.tryParse('${ride['destinationLongitude']}');
+    final version = int.tryParse('${ride['routeVersion']}') ?? 0;
+    final canFollow = _followsDestination &&
+        latitude != null &&
+        longitude != null &&
+        latitude.isFinite &&
+        longitude.isFinite &&
+        latitude.abs() <= 90 &&
+        longitude.abs() <= 180;
+    final destination = canFollow ? LatLng(latitude, longitude) : _destination;
+    final routeChanged =
+        canFollow && (destination != _destination || version != _routeVersion);
+    setState(() {
+      _ride = ride;
+      _routeVersion = version;
+      if (routeChanged) {
+        _destination = destination;
+        _routeGeneration++;
+        _routePoints = const [];
+        _distanceMeters = 0;
+        _durationSeconds = 0;
+        _nextInstruction = '';
+        _nextManeuver = '';
+        _error = null;
+        _loading = true;
+      }
+    });
+    if (routeChanged) {
+      unawaited(_loadRoute(_driverPosition ?? _origin, force: true));
+    }
   }
 
   void _syncPassengerPosition() {
@@ -171,7 +226,10 @@ class _DriverNavigationViewState extends State<DriverNavigationView> {
   }
 
   Future<void> _loadRoute(LatLng origin, {bool force = false}) async {
-    if (_routeRequestInFlight) return;
+    if (_routeRequestInFlight) {
+      if (force) _routeReloadRequested = true;
+      return;
+    }
     final lastOrigin = _lastRouteOrigin;
     final movedEnough = lastOrigin == null ||
         Geolocator.distanceBetween(
@@ -187,14 +245,16 @@ class _DriverNavigationViewState extends State<DriverNavigationView> {
     if (!force && (!movedEnough || requestedRecently)) return;
 
     _routeRequestInFlight = true;
+    final generation = _routeGeneration;
+    final destination = _destination;
     if (_routePoints.isEmpty && mounted) setState(() => _loading = true);
     try {
       final route = await _routeRepository.getDrivingRoute(
         origin: origin,
-        destination: _destination,
+        destination: destination,
         includeSteps: true,
       );
-      if (!mounted) return;
+      if (!mounted || generation != _routeGeneration) return;
       _lastRouteOrigin = origin;
       _lastRouteRequestedAt = DateTime.now();
       setState(() {
@@ -208,10 +268,19 @@ class _DriverNavigationViewState extends State<DriverNavigationView> {
         _nextStepDistanceMeters = nextStep?.distanceMeters ?? 0;
       });
     } catch (_) {
-      if (mounted) setState(() => _error = 'تعذر تحديث مسار القيادة الآن.');
+      if (mounted && generation == _routeGeneration) {
+        setState(() => _error = 'تعذر تحديث مسار القيادة الآن.');
+      }
     } finally {
       _routeRequestInFlight = false;
-      if (mounted) setState(() => _loading = false);
+      if (mounted) {
+        if (_routeReloadRequested || generation != _routeGeneration) {
+          _routeReloadRequested = false;
+          unawaited(_loadRoute(_driverPosition ?? _origin, force: true));
+        } else {
+          setState(() => _loading = false);
+        }
+      }
     }
   }
 
@@ -306,6 +375,34 @@ class _DriverNavigationViewState extends State<DriverNavigationView> {
   @override
   Widget build(BuildContext context) => Scaffold(
         appBar: AppBar(title: Text(_title)),
+        bottomNavigationBar: _rideId == null
+            ? null
+            : SafeArea(
+                child: ConstrainedBox(
+                constraints: BoxConstraints(
+                    maxHeight: MediaQuery.sizeOf(context).height * .4),
+                child: SingleChildScrollView(
+                    child: Column(mainAxisSize: MainAxisSize.min, children: [
+                  RideWaitingPanel(
+                    rideId: _rideId,
+                    isDriver: true,
+                    onChanged: () => unawaited(_driverController
+                        .refreshRide(_rideId)
+                        .catchError((Object _) {})),
+                  ),
+                  if ('${_ride?['status']}' == '5')
+                    RideRouteChangePanel(
+                      rideId: _rideId,
+                      isDriver: true,
+                      selectDestination: () => selectDriverRouteDestination(
+                        context,
+                        _ride ?? const {},
+                      ),
+                      onRouteChanged: () =>
+                          _driverController.refreshRide(_rideId),
+                    ),
+                ])),
+              )),
         body: Stack(
           children: <Widget>[
             AppGoogleMap(
@@ -327,6 +424,15 @@ class _DriverNavigationViewState extends State<DriverNavigationView> {
                     mainAxisSize: MainAxisSize.min,
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: <Widget>[
+                      if (_followsDestination && _ride != null) ...[
+                        Text(
+                            '${_ride!['destinationDisplayName'] ?? _ride!['destinationAddress'] ?? 'وجهة الرحلة'}',
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis),
+                        Text(
+                            'الإجمالي الحالي: ${_ride!['totalAmount'] ?? _ride!['customerPrice'] ?? '-'} ر.ي'),
+                        const SizedBox(height: 8),
+                      ],
                       Row(
                         children: <Widget>[
                           const Icon(Icons.route_rounded),
@@ -408,6 +514,7 @@ class _DriverNavigationViewState extends State<DriverNavigationView> {
   void dispose() {
     _positionWorker.dispose();
     _passengerLocationWorker.dispose();
+    _rideWorker.dispose();
     _markerAnimationTimer?.cancel();
     super.dispose();
   }

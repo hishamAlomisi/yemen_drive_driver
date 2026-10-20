@@ -59,6 +59,8 @@ class DriverController extends GetxController {
   final paymentEnabledRideIds = <int>{};
   final passengerLocationsByRideId = <int, PassengerLocationUpdate>{}.obs;
   final Set<int> _paymentChecksInFlight = <int>{};
+  final Map<int, Future<void>> _rideRefreshes = {};
+  final Set<int> _rideRefreshRequested = {};
   StreamSubscription<Position>? _locationSubscription;
   bool _locationPermissionNoticeShown = false;
   StreamSubscription<TrackingHubEvent>? _hubEventSubscription;
@@ -223,14 +225,19 @@ class DriverController extends GetxController {
       if (rideStatus != null && index >= 0) {
         final updatedRide = Map<String, Object?>.from(rides[index]);
         updatedRide['status'] = rideStatus;
-        updatedRide['customerPaymentEnabled'] =
-            payload['customerPaymentEnabled'] == true;
+        if (payload.containsKey('customerPaymentEnabled')) {
+          updatedRide['customerPaymentEnabled'] =
+              payload['customerPaymentEnabled'] == true;
+        }
         rides[index] = updatedRide;
         if (!_trackableRideStatuses.contains(rideStatus)) {
           passengerLocationsByRideId.remove(rideId);
         }
         _syncActiveRideSubscriptions();
       }
+      // Route approvals keep the same ride status. Fetch the authoritative
+      // destination and fare for every update, including these approvals.
+      unawaited(refreshRide(rideId).catchError((Object _) {}));
       return;
     }
     if (event.name != 'offerUpdated') return;
@@ -328,8 +335,35 @@ class DriverController extends GetxController {
     if (index < 0) {
       rides.insert(0, Map<String, Object?>.from(ride));
     } else {
-      rides[index] = Map<String, Object?>.from(ride);
+      final previous = rides[index];
+      final previousVersion = int.tryParse('${previous['routeVersion']}') ?? 0;
+      final nextVersion = int.tryParse('${ride['routeVersion']}') ?? 0;
+      if (nextVersion < previousVersion) return;
+      rides[index] = {...previous, ...ride};
     }
+  }
+
+  /// Coalesce updates without losing an approval that arrives during a fetch.
+  Future<void> refreshRide(int rideId) {
+    _rideRefreshRequested.add(rideId);
+    return _rideRefreshes.putIfAbsent(rideId, () async {
+      try {
+        do {
+          _rideRefreshRequested.remove(rideId);
+          final latest = await _repository.getRide(rideId);
+          _upsertRide(latest, rideId);
+          if (latest['customerPaymentEnabled'] == true &&
+              latest['paymentCompleted'] != true) {
+            paymentEnabledRideIds.add(rideId);
+          } else {
+            paymentEnabledRideIds.remove(rideId);
+          }
+          _syncActiveRideSubscriptions();
+        } while (_rideRefreshRequested.contains(rideId));
+      } finally {
+        _rideRefreshes.remove(rideId);
+      }
+    });
   }
 
   void _syncActiveRideSubscriptions() {
@@ -352,7 +386,18 @@ class DriverController extends GetxController {
     try {
       final snapshot = await _repository.load(_session.currentUserId.value);
       profile.value = snapshot.profile;
-      rides.assignAll(snapshot.rides);
+      final previousRides = {
+        for (final ride in rides) '${ride['id']}': ride,
+      };
+      rides.assignAll(snapshot.rides.map((ride) {
+        final previous = previousRides['${ride['id']}'];
+        if (previous != null &&
+            (int.tryParse('${previous['routeVersion']}') ?? 0) >
+                (int.tryParse('${ride['routeVersion']}') ?? 0)) {
+          return previous;
+        }
+        return ride;
+      }));
       _prunePassengerLocations();
       paymentEnabledRideIds
         ..clear()
@@ -395,23 +440,45 @@ class DriverController extends GetxController {
     }
   }
 
+  Future<void> markRequestViewed(Map<String, Object?> ride) async {
+    final id = int.tryParse('${ride['id']}');
+    final price = num.tryParse('${ride['customerPrice']}');
+    if (id == null || price == null) return;
+    await _repository.markRequestViewed(rideId: id, customerPrice: price);
+  }
+
   Future<void> sendOffer(Map<String, Object?> ride) async {
     final rideId = int.tryParse('${ride['id']}');
     final driverId = _session.currentUserId.value;
     if (rideId == null || driverId == null) return;
     final controller =
         TextEditingController(text: '${ride['customerPrice'] ?? ''}');
+    final minimum = num.tryParse('${ride['minCustomerPrice']}') ?? 1;
+    final maximum = num.tryParse('${ride['maxCustomerPrice']}') ?? 999999999;
     final amount = await Get.dialog<String>(AlertDialog(
         title: const Text('إرسال عرض'),
         content: TextField(
             controller: controller,
             keyboardType: TextInputType.number,
-            decoration: const InputDecoration(labelText: 'السعر')),
+            decoration: InputDecoration(
+                labelText: 'السعر',
+                helperText: 'المسموح: $minimum – $maximum ر.ي')),
         actions: [
           TextButton(
               onPressed: () => Get.back<void>(), child: const Text('إلغاء')),
           FilledButton(
-              onPressed: () => Get.back(result: controller.text),
+              onPressed: () {
+                final price = num.tryParse(controller.text.trim());
+                if (price == null ||
+                    price < minimum ||
+                    price > maximum ||
+                    price != price.round()) {
+                  Get.snackbar('السعر خارج الحد',
+                      'أدخل أجرة صحيحة من $minimum إلى $maximum ر.ي');
+                  return;
+                }
+                Get.back(result: controller.text);
+              },
               child: const Text('إرسال'))
         ]));
     if (amount == null) return;
@@ -503,8 +570,34 @@ class DriverController extends GetxController {
   Future<void> openCashPayment(Map<String, Object?> ride) async {
     final id = int.tryParse('${ride['id']}');
     if (id == null) return;
+    Map<String, Object?> latest;
+    try {
+      latest = await _repository.getRideForPayment(id);
+      if (latest['waitingIsOpen'] == true) {
+        Get.snackbar('الانتظار مفتوح',
+            'استأنف الرحلة أو اسحب طلب الانتظار قبل التحصيل.');
+        return;
+      }
+      if ('${latest['status']}' == '5' &&
+          latest['customerPaymentEnabled'] != true) {
+        // Freeze the agreed route and fare before the collection screen opens.
+        // The API also refuses this transition while a route request is pending.
+        await _repository.updateRideStatus(
+            rideId: id, status: 5, customerPaymentEnabled: true);
+        latest = await _repository.getRideForPayment(id);
+        _upsertRide(latest, id);
+        paymentEnabledRideIds.add(id);
+      }
+    } catch (error) {
+      Get.snackbar(
+          'تعذر تحديث الأجرة',
+          error is ApiProblemDetails
+              ? error.detail ?? error.title
+              : 'تحقق من الاتصال لتأكيد إجمالي الرحلة قبل التحصيل.');
+      return;
+    }
     await Get.to<void>(() => DriverPaymentView(
-          ride: ride,
+          ride: latest,
           repository: _repository,
           hub: Get.find<TrackingHubService>(),
         ));
@@ -588,11 +681,13 @@ class DriverController extends GetxController {
       return;
     }
     await _openNavigation(ride, ride['destinationLatitude'],
-        ride['destinationLongitude'], 'وجهة الرحلة');
+        ride['destinationLongitude'], 'وجهة الرحلة',
+        followsDestination: true);
   }
 
   Future<void> _openNavigation(Map<String, Object?> ride, Object? latitude,
-      Object? longitude, String title) async {
+      Object? longitude, String title,
+      {bool followsDestination = false}) async {
     final lat = double.tryParse('$latitude');
     final lng = double.tryParse('$longitude');
     if (lat == null || lng == null) {
@@ -607,6 +702,7 @@ class DriverController extends GetxController {
           'destinationLatitude': lat,
           'destinationLongitude': lng,
           'title': title,
+          'followsDestination': followsDestination,
         });
   }
 
@@ -651,7 +747,8 @@ class DriverController extends GetxController {
     if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
       return AndroidSettings(
         accuracy: LocationAccuracy.bestForNavigation,
-        distanceFilter: 5,
+        // Waiting requires fresh GPS fixes even while the car is stationary.
+        distanceFilter: 0,
         intervalDuration: const Duration(seconds: 3),
         foregroundNotificationConfig: const ForegroundNotificationConfig(
           notificationTitle: 'سائق يمن درايف يتتبع موقعك',
@@ -665,7 +762,7 @@ class DriverController extends GetxController {
 
     return const LocationSettings(
       accuracy: LocationAccuracy.bestForNavigation,
-      distanceFilter: 5,
+      distanceFilter: 0,
     );
   }
 

@@ -110,7 +110,7 @@ class AppButton extends StatelessWidget {
           disabledForegroundColor: foreground.withValues(alpha: .65),
           side: border,
           shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(10),
+            borderRadius: BorderRadius.circular(18),
           ),
         ),
         child: child,
@@ -118,4 +118,3 @@ class AppButton extends StatelessWidget {
     );
   }
 }
-

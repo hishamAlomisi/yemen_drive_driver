@@ -1,247 +1,328 @@
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
-import 'package:url_launcher/url_launcher.dart';
-
+import '../../../shared/widgets/app_brand_icon.dart';
 import '../controllers/driver_controller.dart';
-import '../driver_routes.dart';
-import 'driver_chat_view.dart';
+import '../widgets/driver_design.dart';
+import '../widgets/driver_ride_card.dart';
+import '../widgets/request_view_tracker.dart';
 
-class DriverHomeView extends GetView<DriverController> {
+class DriverHomeView extends StatefulWidget {
   const DriverHomeView({super.key});
   @override
+  State<DriverHomeView> createState() => _DriverHomeViewState();
+}
+
+class _DriverHomeViewState extends State<DriverHomeView> {
+  DriverController get controller => Get.find<DriverController>();
+  int _filter = 0;
+  bool _open(Map<String, Object?> ride) =>
+      ride['driverId'] == null &&
+      ('${ride['status']}' == '1' || '${ride['status']}' == '2');
+  bool _mine(Map<String, Object?> ride) =>
+      controller.currentUserId != null &&
+      '${ride['driverId']}' == '${controller.currentUserId}';
+
+  @override
   Widget build(BuildContext context) => Scaffold(
-      appBar: AppBar(title: const Text('لوحة السائق'), actions: [
-        Obx(() => IconButton(
-              onPressed: controller.showNotifications,
-              icon: Badge(
-                isLabelVisible: controller.unreadNotifications > 0,
-                label: Text('${controller.unreadNotifications}'),
-                child: const Icon(Icons.notifications_outlined),
-              ),
-            )),
-        IconButton(onPressed: controller.load, icon: const Icon(Icons.refresh)),
-        IconButton(
-            onPressed: () => Get.toNamed<void>(DriverRoutes.history),
-            icon: const Icon(Icons.history)),
-        IconButton(
-            onPressed: () => Get.toNamed<void>(DriverRoutes.wallet),
-            icon: const Icon(Icons.account_balance_wallet_outlined)),
-        IconButton(
-            onPressed: controller.signOut, icon: const Icon(Icons.logout))
-      ]),
-      body: Obx(() => controller.isLoading.value && controller.rides.isEmpty
-          ? const Center(child: CircularProgressIndicator())
-          : controller.error.value != null && controller.rides.isEmpty
-              ? Center(child: Text(controller.error.value!))
-              : RefreshIndicator(
+        bottomNavigationBar: const DriverBottomBar(index: 0),
+        body: SafeArea(
+          bottom: false,
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 760),
+              child: Obx(() {
+                final rides = controller.rides
+                    .where(
+                      (r) =>
+                          _filter == 0 || (_filter == 1 ? _open(r) : _mine(r)),
+                    )
+                    .toList();
+                final openCount = controller.rides.where(_open).length;
+                final assigned = controller.rides
+                    .where(_mine)
+                    .where(
+                      (r) =>
+                          [3, 4, 5, 8].contains(int.tryParse('${r['status']}')),
+                    )
+                    .length;
+                return RefreshIndicator(
                   onRefresh: controller.load,
-                  child: ListView(padding: const EdgeInsets.all(16), children: [
-                    _profile(context),
-                    const SizedBox(height: 12),
-                    Row(children: [
-                      _stat(context, 'الرحلات المفتوحة', _openCount,
-                          Icons.search),
-                      const SizedBox(width: 12),
-                      _stat(context, 'رحلاتي', _assignedCount,
-                          Icons.assignment_turned_in)
-                    ]),
-                    const SizedBox(height: 20),
-                    Text('الرحلات',
-                        style: Theme.of(context).textTheme.titleLarge),
-                    const SizedBox(height: 8),
-                    ...controller.rides.map((ride) => _rideCard(context, ride))
-                  ]))),
-      floatingActionButton: FloatingActionButton.extended(
-          onPressed: controller.updateLocation,
-          icon: const Icon(Icons.my_location),
-          label: const Text('تحديث موقعي')));
-  int get _openCount => controller.rides
-      .where((ride) =>
-          ride['driverId'] == null &&
-          (ride['status'] == 1 || ride['status'] == 2))
-      .length;
-  int get _assignedCount => controller.rides
-      .where((ride) =>
-          ride['driverId']?.toString() == controller.currentUserId?.toString())
-      .length;
-  Widget _profile(BuildContext context) => Card(
-      child: ListTile(
-          leading: const CircleAvatar(child: Icon(Icons.local_taxi)),
-          title: Text(
-              controller.profile.value?['displayName']?.toString() ?? 'السائق'),
-          subtitle: Text(
-              controller.profile.value?['serviceNameAr']?.toString() ??
-                  'ملف السائق')));
-  Widget _stat(BuildContext context, String label, int value, IconData icon) =>
+                  child: ListView(
+                    physics: const AlwaysScrollableScrollPhysics(),
+                    padding: const EdgeInsets.fromLTRB(22, 22, 22, 24),
+                    children: [
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  'أهلًا بك، شريك الطريق',
+                                  style: Theme.of(context).textTheme.bodySmall,
+                                ),
+                                Text(
+                                  '${controller.profile.value?['displayName'] ?? 'كابتن يمن درايف'}',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: Theme.of(context).textTheme.titleLarge,
+                                ),
+                              ],
+                            ),
+                          ),
+                          IconButton.filledTonal(
+                            tooltip: 'الإشعارات',
+                            onPressed: controller.showNotifications,
+                            icon: Badge(
+                              isLabelVisible:
+                                  controller.unreadNotifications > 0,
+                              label: Text(
+                                '${controller.unreadNotifications}',
+                              ),
+                              child: const Icon(
+                                Icons.notifications_none_rounded,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          InkWell(
+                            borderRadius: BorderRadius.circular(18),
+                            onTap: () => showDriverProfile(context),
+                            child: Container(
+                              width: 48,
+                              height: 48,
+                              decoration: BoxDecoration(
+                                color: forest,
+                                borderRadius: BorderRadius.circular(18),
+                              ),
+                              child: const Icon(
+                                Icons.person_outline_rounded,
+                                color: copper,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 24),
+                      DriverHero(
+                        compact: true,
+                        eyebrow:
+                            '${controller.profile.value?['serviceNameAr'] ?? 'يمن درايف للسائق'}',
+                        title: 'رحلتك القادمة تبدأ هنا.',
+                        subtitle: 'اختر طلبك، قدّم عرضك، وانطلق بثقة.',
+                        trailing: const AppBrandIcon(size: 32),
+                      ),
+                      const SizedBox(height: 16),
+                      Row(
+                        children: [
+                          _metric(
+                            context,
+                            '$openCount',
+                            'طلبات متاحة',
+                            Icons.radar_rounded,
+                          ),
+                          const SizedBox(width: 12),
+                          _metric(
+                            context,
+                            '$assigned',
+                            'رحلات جارية',
+                            Icons.route_rounded,
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 14),
+                      Material(
+                        color: Theme.of(context).colorScheme.surface,
+                        borderRadius: BorderRadius.circular(18),
+                        child: InkWell(
+                          onTap: controller.updateLocation,
+                          borderRadius: BorderRadius.circular(18),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 14,
+                              vertical: 12,
+                            ),
+                            child: Row(
+                              children: [
+                                Icon(
+                                  Icons.my_location_rounded,
+                                  size: 20,
+                                  color: Theme.of(context).colorScheme.primary,
+                                ),
+                                const SizedBox(width: 10),
+                                Expanded(
+                                  child: Text(
+                                    controller.currentPosition.value == null
+                                        ? 'حدّث موقعك لرحلات أقرب إليك'
+                                        : 'موقعك محدّث · اضغط للتحديث',
+                                    style:
+                                        Theme.of(context).textTheme.bodySmall,
+                                  ),
+                                ),
+                                const Icon(
+                                  Icons.chevron_left_rounded,
+                                  size: 20,
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 26),
+                      Row(
+                        children: [
+                          Text(
+                            'على طريقك',
+                            style: Theme.of(context).textTheme.titleLarge,
+                          ),
+                          const Spacer(),
+                          IconButton(
+                            tooltip: 'تحديث الطلبات',
+                            onPressed: controller.load,
+                            icon: const Icon(
+                              Icons.refresh_rounded,
+                              size: 21,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 10),
+                      Row(
+                        children: List.generate(
+                          3,
+                          (i) => Expanded(
+                            child: Padding(
+                              padding: EdgeInsetsDirectional.only(
+                                end: i == 2 ? 0 : 8,
+                              ),
+                              child: ChoiceChip(
+                                showCheckmark: false,
+                                selected: _filter == i,
+                                onSelected: (_) => setState(
+                                  () => _filter = i,
+                                ),
+                                label: Center(
+                                  child: Text(
+                                    [
+                                      'الكل',
+                                      'المتاحة',
+                                      'المسندة لي',
+                                    ][i],
+                                  ),
+                                ),
+                                selectedColor:
+                                    Theme.of(context).colorScheme.primary,
+                                labelStyle: TextStyle(
+                                  fontFamily: 'BeINArabic',
+                                  fontSize: 12,
+                                  color: _filter == i
+                                      ? Theme.of(context).colorScheme.onPrimary
+                                      : Theme.of(context).colorScheme.onSurface,
+                                ),
+                                padding:
+                                    const EdgeInsets.symmetric(vertical: 8),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 18),
+                      if (controller.isLoading.value)
+                        const Padding(
+                          padding: EdgeInsets.only(bottom: 16),
+                          child: LinearProgressIndicator(minHeight: 2),
+                        ),
+                      if (controller.error.value != null)
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 16),
+                          child: Card(
+                            child: Padding(
+                              padding: const EdgeInsets.all(16),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.stretch,
+                                children: [
+                                  Text(
+                                    controller.error.value!,
+                                    style: TextStyle(
+                                      color:
+                                          Theme.of(context).colorScheme.error,
+                                    ),
+                                  ),
+                                  TextButton(
+                                    onPressed: controller.load,
+                                    child: const Text(
+                                      'إعادة المحاولة',
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                      if (rides.isEmpty &&
+                          !controller.isLoading.value &&
+                          controller.error.value == null)
+                        const DriverEmptyState(
+                          title: 'الطريق ينتظر رحلتك القادمة',
+                          message:
+                              'ستظهر الطلبات المناسبة هنا عند توفرها.\nيمكنك سحب الشاشة لتحديث القائمة.',
+                        ),
+                      ...rides.map(
+                        (ride) => _open(ride)
+                            ? RequestViewTracker(
+                                key: ValueKey(
+                                  'view-${ride['id']}-${ride['customerPrice']}-${ride['updatedAtUtc']}',
+                                ),
+                                report: () =>
+                                    controller.markRequestViewed(ride),
+                                child: DriverRideCard(ride: ride),
+                              )
+                            : DriverRideCard(ride: ride),
+                      ),
+                    ],
+                  ),
+                );
+              }),
+            ),
+          ),
+        ),
+      );
+
+  Widget _metric(
+    BuildContext context,
+    String value,
+    String label,
+    IconData icon,
+  ) =>
       Expanded(
-          child: Card(
-              child: Padding(
-                  padding: const EdgeInsets.all(14),
-                  child: Column(children: [
-                    Icon(icon, color: Theme.of(context).colorScheme.primary),
-                    const SizedBox(height: 6),
-                    Text('$value',
-                        style: Theme.of(context)
-                            .textTheme
-                            .headlineSmall
-                            ?.copyWith(fontWeight: FontWeight.bold)),
-                    Text(label)
-                  ]))));
-  Widget _rideCard(BuildContext context, Map<String, Object?> ride) {
-    final assigned =
-        ride['driverId']?.toString() == controller.currentUserId?.toString();
-    final state = int.tryParse('${ride['status']}') ?? 0;
-    final offerStatus = int.tryParse('${ride['driverOfferStatus']}');
-    final canSendOrEditOffer = !assigned &&
-        ride['driverId'] == null &&
-        (state == 1 || state == 2) &&
-        (offerStatus == null ||
-            offerStatus == 0 ||
-            offerStatus == 2 ||
-            offerStatus == 3);
-    const labels = {
-      0: 'مسودة',
-      1: 'تبحث عن سائق',
-      2: 'مفاوضة',
-      3: 'تم التعيين',
-      4: 'في الطريق',
-      5: 'بدأت',
-      6: 'مكتملة',
-      7: 'ملغاة',
-      8: 'طلب إلغاء قيد المراجعة',
-    };
-    return Card(
-        margin: const EdgeInsets.only(bottom: 10),
-        child: Padding(
-            padding: const EdgeInsets.all(14),
-            child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Row(children: [
-                    Expanded(
-                        child: Text('رحلة #${ride['id']}',
-                            style:
-                                const TextStyle(fontWeight: FontWeight.bold))),
-                    Chip(label: Text(labels[state] ?? 'غير معروف'))
-                  ]),
-                  Text(
-                      '${ride['pickupDisplayName'] ?? ride['pickupAddress'] ?? '-'}  ←  ${ride['destinationDisplayName'] ?? ride['destinationAddress'] ?? '-'}'),
-                  if (ride['pickupDistanceMeters'] != null) ...[
-                    const SizedBox(height: 4),
-                    Text(
-                        'يبعد عنك ${_distanceText(ride['pickupDistanceMeters'])}'),
-                  ],
-                  const SizedBox(height: 5),
-                  Text('السعر: ${ride['customerPrice'] ?? '-'} ر.ي'),
-                  if (ride['driverOfferAmount'] != null) ...[
-                    const SizedBox(height: 4),
-                    Text(
-                        offerStatus == 2
-                            ? 'تم رفض عرضك: ${ride['driverOfferAmount']} ر.ي'
-                            : offerStatus == 3
-                                ? 'انتهت صلاحية عرضك: ${ride['driverOfferAmount']} ر.ي'
-                                : 'عرضك الحالي: ${ride['driverOfferAmount']} ر.ي',
-                        style: TextStyle(
-                            color: Theme.of(context).colorScheme.primary,
-                            fontWeight: FontWeight.w600)),
-                  ],
-                  const SizedBox(height: 10),
-                  if (canSendOrEditOffer)
-                    FilledButton.icon(
-                        onPressed: () => controller.sendOffer(ride),
-                        icon: const Icon(Icons.local_offer_outlined),
-                        label: Text((offerStatus == 2 || offerStatus == 3)
-                            ? 'إرسال عرض جديد'
-                            : ride['driverOfferAmount'] != null
-                                ? 'تعديل العرض'
-                                : 'إرسال عرض')),
-                  if (!assigned && ride['pickupLatitude'] != null)
-                    OutlinedButton.icon(
-                      onPressed: () => controller.openPickupNavigation(ride),
-                      icon: const Icon(Icons.navigation_outlined),
-                      label: const Text('فتح مسار إلى نقطة الانطلاق'),
-                    ),
-                  if (assigned && state == 3)
-                    FilledButton.icon(
-                        onPressed: () =>
-                            controller.updateStatus(ride, 4, 'في الطريق'),
-                        icon: const Icon(Icons.directions_car),
-                        label: const Text('بدء التوجه')),
-                  if (assigned && ride['destinationAvailable'] == true)
-                    OutlinedButton.icon(
-                      onPressed: () =>
-                          controller.openDestinationNavigation(ride),
-                      icon: const Icon(Icons.route_outlined),
-                      label: const Text('فتح مسار الوجهة'),
-                    ),
-                  if (assigned && state == 4)
-                    FilledButton.icon(
-                        onPressed: () =>
-                            controller.updateStatus(ride, 5, 'بدأت الرحلة'),
-                        icon: const Icon(Icons.play_arrow),
-                        label: const Text('بدء الرحلة')),
-                  if (assigned && state == 5) ...[
-                    FilledButton.icon(
-                        onPressed: ride['paymentCompleted'] == true ? null : () => controller.openCashPayment(ride),
-                        icon: const Icon(Icons.payments_outlined),
-                        label: const Text('تحصيل الدفع')),
-                    const SizedBox(height: 8),
-                    FilledButton.icon(
-                        onPressed: ride['paymentCompleted'] == true ? null : () => controller.enableCustomerPayment(ride),
-                        icon: const Icon(Icons.credit_score_outlined),
-                        label: const Text('تمكين طرق الدفع للعميل')),
-                    const SizedBox(height: 8),
-                    FilledButton.icon(
-                        onPressed: () => controller.updateStatus(ride, 6, 'مكتملة'),
-                        icon: const Icon(Icons.flag_rounded),
-                        label: const Text('إنهاء الرحلة')),
-                    const SizedBox(height: 8),
-                    OutlinedButton.icon(
-                        onPressed: () => Get.to<void>(
-                            () => DriverChatView(rideId: '${ride['id']}')),
-                        icon: const Icon(Icons.chat_bubble_outline),
-                        label: const Text('محادثة العميل')),
-                    const SizedBox(height: 8),
-                    OutlinedButton.icon(
-                      onPressed: () => _callCustomer(ride['customerPhone']),
-                      icon: const Icon(Icons.phone_outlined),
-                      label: const Text('اتصال بالعميل'),
-                    )
-                  ],
-                  if (assigned && state == 6 && ride['cashPaymentRequestStatus'] == 1)
-                    OutlinedButton.icon(
-                      onPressed: () => controller.openCashPayment(ride),
-                      icon: const Icon(Icons.payments_outlined),
-                      label: const Text('تسجيل تحصيل نقدي بطلب العميل'),
-                    ),
-                  if (assigned && state == 4)
-                    OutlinedButton.icon(
-                        onPressed: () => Get.to<void>(
-                            () => DriverChatView(rideId: '${ride['id']}')),
-                        icon: const Icon(Icons.chat_bubble_outline),
-                        label: const Text('محادثة العميل')),
-                  if (assigned && (state == 3 || state == 4))
-                    OutlinedButton.icon(
-                      onPressed: () => _callCustomer(ride['customerPhone']),
-                      icon: const Icon(Icons.phone_outlined),
-                      label: const Text('اتصال بالعميل'),
-                    )
-                ])));
-  }
-
-  String _distanceText(Object? value) {
-    final meters = double.tryParse('$value');
-    if (meters == null) return '-';
-    if (meters < 1000) return '${meters.round()} م';
-    return '${(meters / 1000).toStringAsFixed(1)} كم';
-  }
-
-  Future<void> _callCustomer(Object? phone) async {
-    final value = phone?.toString().trim();
-    if (value == null || value.isEmpty) return;
-    final uri = Uri(scheme: 'tel', path: value);
-    if (!await launchUrl(uri)) {
-      Get.snackbar('تعذر الاتصال', 'لم يتمكن الجهاز من فتح تطبيق الهاتف.');
-    }
-  }
+        child: Card(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        value,
+                        style: Theme.of(context).textTheme.headlineMedium,
+                      ),
+                      Text(
+                        label,
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ],
+                  ),
+                ),
+                Icon(
+                  icon,
+                  color: Theme.of(context).colorScheme.secondary,
+                  size: 27,
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
 }

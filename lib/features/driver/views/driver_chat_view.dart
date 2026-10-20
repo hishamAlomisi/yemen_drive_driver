@@ -119,8 +119,12 @@ class _DriverChatViewState extends State<DriverChatView> {
           _scrollController.position.maxScrollExtent -
                   _scrollController.position.pixels <=
               120;
-      setState(() => _mergeMessages(<Map<String, Object?>>[event.payload],
-          scrollToBottom: shouldScrollToBottom));
+      setState(
+        () => _mergeMessages(
+          <Map<String, Object?>>[event.payload],
+          scrollToBottom: shouldScrollToBottom,
+        ),
+      );
     }
   }
 
@@ -177,8 +181,10 @@ class _DriverChatViewState extends State<DriverChatView> {
             json is Map ? Map<String, Object?>.from(json) : <String, Object?>{},
       );
       if (result is ApiSuccess<Map<String, Object?>>) {
-        _mergeMessages(<Map<String, Object?>>[result.data],
-            scrollToBottom: true);
+        _mergeMessages(
+          <Map<String, Object?>>[result.data],
+          scrollToBottom: true,
+        );
         _input.clear();
       } else {
         Get.snackbar('تعذر إرسال الرسالة', 'حاول مرة أخرى.');
@@ -193,93 +199,139 @@ class _DriverChatViewState extends State<DriverChatView> {
   @override
   Widget build(BuildContext context) => Scaffold(
         appBar: AppBar(title: const Text('محادثة العميل')),
-        body: Column(children: <Widget>[
-          Expanded(
-            child: _loading && _messages.isEmpty
-                ? const Center(child: CircularProgressIndicator())
-                : RefreshIndicator(
-                    onRefresh: _load,
-                    child: _messages.isEmpty
-                        ? ListView(
-                            physics: const AlwaysScrollableScrollPhysics(),
-                            children: const <Widget>[
-                              Padding(
-                                padding: EdgeInsets.only(top: 96),
-                                child: Center(
-                                  child: Text('ابدأ المحادثة مع العميل.'),
+        body: Column(
+          children: <Widget>[
+            Expanded(
+              child: _loading && _messages.isEmpty
+                  ? const Center(child: CircularProgressIndicator())
+                  : RefreshIndicator(
+                      onRefresh: _load,
+                      child: _messages.isEmpty
+                          ? ListView(
+                              physics: const AlwaysScrollableScrollPhysics(),
+                              children: const <Widget>[
+                                Padding(
+                                  padding: EdgeInsets.only(top: 96),
+                                  child: Center(
+                                    child: Text('ابدأ المحادثة مع العميل.'),
+                                  ),
                                 ),
-                              ),
-                            ],
-                          )
-                        : ListView.builder(
-                            controller: _scrollController,
-                            physics: const AlwaysScrollableScrollPhysics(),
-                            padding: const EdgeInsets.all(12),
-                            itemCount:
-                                _messages.length + (_hasOlderMessages ? 1 : 0),
-                            itemBuilder: (_, index) {
-                              if (_hasOlderMessages && index == 0) {
-                                return Center(
-                                  child: TextButton.icon(
-                                    onPressed: _loadingOlder
-                                        ? null
-                                        : () => _load(older: true),
-                                    icon: _loadingOlder
-                                        ? const SizedBox(
-                                            width: 16,
-                                            height: 16,
-                                            child: CircularProgressIndicator(
-                                                strokeWidth: 2),
-                                          )
-                                        : const Icon(Icons.history_rounded),
-                                    label: const Text('تحميل رسائل أقدم'),
+                              ],
+                            )
+                          : ListView.builder(
+                              controller: _scrollController,
+                              physics: const AlwaysScrollableScrollPhysics(),
+                              padding: const EdgeInsets.all(12),
+                              itemCount: _messages.length +
+                                  (_hasOlderMessages ? 1 : 0),
+                              itemBuilder: (_, index) {
+                                if (_hasOlderMessages && index == 0) {
+                                  return Center(
+                                    child: TextButton.icon(
+                                      onPressed: _loadingOlder
+                                          ? null
+                                          : () => _load(older: true),
+                                      icon: _loadingOlder
+                                          ? const SizedBox(
+                                              width: 16,
+                                              height: 16,
+                                              child: CircularProgressIndicator(
+                                                strokeWidth: 2,
+                                              ),
+                                            )
+                                          : const Icon(Icons.history_rounded),
+                                      label: const Text('تحميل رسائل أقدم'),
+                                    ),
+                                  );
+                                }
+                                final messageIndex =
+                                    _hasOlderMessages ? index - 1 : index;
+                                final message = _messages[messageIndex];
+                                final senderId = int.tryParse(
+                                  '${message['senderId'] ?? ''}',
+                                );
+                                final isDriverMessage = senderId != null &&
+                                    senderId == _session.currentUserId.value;
+                                return Align(
+                                  alignment: isDriverMessage
+                                      ? AlignmentDirectional.centerStart
+                                      : AlignmentDirectional.centerEnd,
+                                  child: Container(
+                                    constraints: BoxConstraints(
+                                      maxWidth:
+                                          MediaQuery.sizeOf(context).width *
+                                              .76,
+                                    ),
+                                    margin: const EdgeInsets.only(bottom: 12),
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 18,
+                                      vertical: 13,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      color: isDriverMessage
+                                          ? Theme.of(context)
+                                              .colorScheme
+                                              .primary
+                                          : Theme.of(context)
+                                              .colorScheme
+                                              .surface,
+                                      borderRadius:
+                                          BorderRadiusDirectional.only(
+                                        topStart: const Radius.circular(20),
+                                        topEnd: const Radius.circular(20),
+                                        bottomStart: Radius.circular(
+                                          isDriverMessage ? 4 : 20,
+                                        ),
+                                        bottomEnd: Radius.circular(
+                                          isDriverMessage ? 20 : 4,
+                                        ),
+                                      ),
+                                    ),
+                                    child: Text(
+                                      '${message['content'] ?? ''}',
+                                      style: TextStyle(
+                                        color: isDriverMessage
+                                            ? Theme.of(context)
+                                                .colorScheme
+                                                .onPrimary
+                                            : Theme.of(context)
+                                                .colorScheme
+                                                .onSurface,
+                                      ),
+                                    ),
                                   ),
                                 );
-                              }
-                              final messageIndex =
-                                  _hasOlderMessages ? index - 1 : index;
-                              final message = _messages[messageIndex];
-                              final senderId =
-                                  int.tryParse('${message['senderId'] ?? ''}');
-                              final isDriverMessage = senderId != null &&
-                                  senderId == _session.currentUserId.value;
-                              return Align(
-                                alignment: isDriverMessage
-                                    ? AlignmentDirectional.centerStart
-                                    : AlignmentDirectional.centerEnd,
-                                child: Card(
-                                  child: Padding(
-                                    padding: const EdgeInsets.all(10),
-                                    child: Text('${message['content'] ?? ''}'),
-                                  ),
-                                ),
-                              );
-                            },
-                          ),
-                  ),
-          ),
-          SafeArea(
-            child: Padding(
-              padding: const EdgeInsets.all(10),
-              child: Row(children: <Widget>[
-                Expanded(
-                  child: TextField(
-                    controller: _input,
-                    minLines: 1,
-                    maxLines: 4,
-                    textInputAction: TextInputAction.send,
-                    onSubmitted: (_) => _send(),
-                    decoration: const InputDecoration(hintText: 'اكتب رسالة'),
-                  ),
-                ),
-                IconButton(
-                  onPressed: _sending ? null : _send,
-                  icon: const Icon(Icons.send_rounded),
-                ),
-              ]),
+                              },
+                            ),
+                    ),
             ),
-          ),
-        ]),
+            SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.all(10),
+                child: Row(
+                  children: <Widget>[
+                    Expanded(
+                      child: TextField(
+                        controller: _input,
+                        minLines: 1,
+                        maxLines: 4,
+                        textInputAction: TextInputAction.send,
+                        onSubmitted: (_) => _send(),
+                        decoration:
+                            const InputDecoration(hintText: 'اكتب رسالة'),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    IconButton.filled(
+                      onPressed: _sending ? null : _send,
+                      icon: const Icon(Icons.send_rounded),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
       );
 
   @override

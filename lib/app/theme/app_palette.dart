@@ -1,9 +1,10 @@
 import 'package:flutter/material.dart';
 
-enum AppPalette { yemenDrive, blueGold, midnightBurgundy }
+enum AppPalette { sanaaNight, yemenDrive, blueGold, midnightBurgundy }
 
 extension AppPaletteLabels on AppPalette {
   String get label => switch (this) {
+        AppPalette.sanaaNight => 'ليل صنعاء',
         AppPalette.yemenDrive => 'يمن درايف',
         AppPalette.blueGold => 'الهوية الزرقاء الذهبية',
         AppPalette.midnightBurgundy => 'العنابي الليلي',
@@ -21,6 +22,12 @@ class AppPaletteColors {
   final Color primary;
   final Color primaryDark;
   final Color secondary;
+
+  static const AppPaletteColors sanaaNight = AppPaletteColors(
+    primary: Color(0xFF174C43),
+    primaryDark: Color(0xFF102F2B),
+    secondary: Color(0xFFB68150),
+  );
 
   static const AppPaletteColors yemenDrive = AppPaletteColors(
     primary: Color(0xFFFBC02D),
@@ -44,9 +51,9 @@ class AppPaletteColors {
 
 extension AppPaletteValues on AppPalette {
   AppPaletteColors get colors => switch (this) {
+        AppPalette.sanaaNight => AppPaletteColors.sanaaNight,
         AppPalette.yemenDrive => AppPaletteColors.yemenDrive,
         AppPalette.blueGold => AppPaletteColors.blueGold,
         AppPalette.midnightBurgundy => AppPaletteColors.midnightBurgundy,
       };
 }
-

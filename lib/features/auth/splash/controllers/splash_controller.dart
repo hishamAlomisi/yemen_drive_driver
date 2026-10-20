@@ -1,25 +1,34 @@
 import 'package:get/get.dart';
-import 'package:get_storage/get_storage.dart';
 
 import '../../../../core/services/auth_session_service.dart';
+import '../../../../core/services/startup_connection_service.dart';
 import '../../../driver/driver_routes.dart';
-import '../../routes/auth_routes.dart';
 
 class SplashController extends GetxController {
-  SplashController({GetStorage? storage}) : _storage = storage ?? GetStorage();
-  final GetStorage _storage;
+  SplashController(this.connection);
+
+  final StartupConnectionService connection;
+  bool _continuing = false;
 
   @override
   void onReady() {
     super.onReady();
-    _continueAfterSplash();
+    retry();
   }
 
-  Future<void> _continueAfterSplash() async {
-    await Future<void>.delayed(const Duration(milliseconds: 1450));
-    if (isClosed) return;
-    final hasSeenOnboarding =
-        _storage.read<bool>('has_seen_onboarding') ?? false;
+  Future<void> retry() async {
+    if (_continuing) return;
+    _continuing = true;
+    try {
+      final connected = connection.isVerified || await connection.verify();
+      if (!connected || isClosed) return;
+      _continueAfterSplash();
+    } finally {
+      _continuing = false;
+    }
+  }
+
+  void _continueAfterSplash() {
     final session = Get.find<AuthSessionService>();
     if (session.hasPendingNotificationOpen) {
       if (session.isAuthenticated.value) {
@@ -27,10 +36,6 @@ class SplashController extends GetxController {
       } else {
         Get.offAllNamed<void>(DriverRoutes.login);
       }
-      return;
-    }
-    if (!hasSeenOnboarding) {
-      Get.offAllNamed<void>(AuthRoutes.onboardingOne);
       return;
     }
     Get.offAllNamed<void>(

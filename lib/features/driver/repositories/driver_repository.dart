@@ -1,3 +1,4 @@
+import '../../../shared/models/ride_waiting_snapshot.dart';
 import '../models/driver_models.dart';
 import '../providers/driver_provider.dart';
 
@@ -9,7 +10,11 @@ abstract interface class DriverRepository {
       required String challengeId,
       required String deviceId});
   Future<DriverSnapshot> load(int? userId);
+  Future<void> markRequestViewed(
+      {required int rideId, required num customerPrice});
   Future<bool> isRidePaymentCompleted(int rideId);
+  Future<Map<String, Object?>> getRide(int rideId);
+  Future<Map<String, Object?>> getRideForPayment(int rideId);
   Future<void> sendOffer(
       {required int rideId, required int driverId, required num amount});
   Future<void> updateRideStatus(
@@ -33,6 +38,46 @@ abstract interface class DriverRepository {
 class ApiDriverRepository implements DriverRepository {
   const ApiDriverRepository(this._provider);
   final DriverProvider _provider;
+
+  @override
+  Future<Map<String, Object?>> getRide(int rideId) async {
+    final detail = await _provider.executeData(
+      'RideModel',
+      'get',
+      <String, Object?>{'id': rideId},
+    );
+    final ride = detail['ride'];
+    if (ride is! Map || '${ride['id']}' != '$rideId') {
+      throw const FormatException('تعذر تأكيد بيانات الرحلة من الخادم.');
+    }
+    return Map<String, Object?>.from(ride);
+  }
+
+  @override
+  Future<Map<String, Object?>> getRideForPayment(int rideId) async {
+    final waiting = await _provider.executeData(
+      'RideWaitingModel',
+      'get',
+      <String, Object?>{'rideId': rideId},
+    );
+    final waitingSnapshot = RideWaitingSnapshot(waiting);
+    final detail = await _provider.executeData(
+      'RideModel',
+      'get',
+      <String, Object?>{'id': rideId},
+    );
+    final ride = detail['ride'];
+    if (ride is! Map ||
+        '${ride['id']}' != '$rideId' ||
+        ride['totalAmount'] == null ||
+        ride['waitingFee'] == null) {
+      throw const FormatException('تعذر تأكيد إجمالي الرحلة من الخادم.');
+    }
+    return <String, Object?>{
+      ...Map<String, Object?>.from(ride),
+      'waitingIsOpen': waitingSnapshot.isOpen,
+    };
+  }
 
   @override
   Future<DriverAuthResult> login(DriverLoginRequest request) async {
@@ -92,13 +137,21 @@ class ApiDriverRepository implements DriverRepository {
   }
 
   @override
+  Future<void> markRequestViewed(
+          {required int rideId, required num customerPrice}) =>
+      _provider.execute('RideSearchViewModel', 'update', <String, Object?>{
+        'rideId': rideId,
+        'customerPrice': customerPrice,
+      });
+
+  @override
   Future<void> sendOffer(
           {required int rideId, required int driverId, required num amount}) =>
       _provider.execute('RideOfferModel', 'add', <String, Object?>{
         'rideId': rideId,
         'driverId': driverId,
         'amount': amount,
-        'validForSeconds': 300
+        'validForSeconds': 60
       });
 
   @override

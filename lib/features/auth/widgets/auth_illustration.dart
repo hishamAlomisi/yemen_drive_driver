@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import '../../../app/theme/app_colors.dart';
+import '../../../shared/widgets/app_brand_icon.dart';
 import '../models/auth_models.dart';
 
 class AuthBrandMark extends StatelessWidget {
@@ -29,11 +30,7 @@ class AuthBrandMark extends StatelessWidget {
                 ),
               ],
             ),
-            child: Icon(
-              Icons.local_taxi_rounded,
-              size: size * .56,
-              color: AppColors.primaryDark,
-            ),
+            child: AppBrandIcon(size: size),
           ),
           if (showName) ...<Widget>[
             const SizedBox(height: 16),
@@ -228,4 +225,3 @@ class _CityArtworkPainter extends CustomPainter {
   bool shouldRepaint(covariant _CityArtworkPainter oldDelegate) =>
       oldDelegate.artwork != artwork || oldDelegate.isDark != isDark;
 }
-

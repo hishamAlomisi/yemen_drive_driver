@@ -7,10 +7,10 @@ import '../../app/theme/app_palette.dart';
 
 class ThemeService extends GetxService {
   static const String _key = 'theme_mode';
-  static const String _paletteKey = 'app_palette';
+  static const String _paletteKey = 'driver_palette_sanaa';
   final GetStorage _storage = GetStorage();
   final Rx<ThemeMode> mode = ThemeMode.system.obs;
-  final Rx<AppPalette> palette = AppPalette.blueGold.obs;
+  final Rx<AppPalette> palette = AppPalette.sanaaNight.obs;
 
   Future<ThemeService> init() async {
     final saved = _storage.read<String>(_key);
@@ -23,7 +23,7 @@ class ThemeService extends GetxService {
       'yemenDrive' => AppPalette.yemenDrive,
       'blueGold' => AppPalette.blueGold,
       'midnightBurgundy' => AppPalette.midnightBurgundy,
-      _ => AppPalette.blueGold,
+      _ => AppPalette.sanaaNight,
     };
     AppColors.setPalette(palette.value);
     return this;
@@ -44,4 +44,3 @@ class ThemeService extends GetxService {
     await _storage.write(_paletteKey, value.name);
   }
 }
-

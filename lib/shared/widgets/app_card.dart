@@ -24,7 +24,7 @@ class AppCard extends StatelessWidget {
         child: Material(
           color: color ?? Theme.of(context).cardColor,
           shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(14),
+            borderRadius: BorderRadius.circular(24),
             side: BorderSide(
               color: borderColor ??
                   Theme.of(context)
@@ -41,4 +41,3 @@ class AppCard extends StatelessWidget {
         ),
       );
 }
-

@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ليل صنعاء — يمن درايف</title>
+<style>
+@font-face{font-family:BeIN;src:url('../assets/fonts/bein_ar_regular.ttf')}
+*{box-sizing:border-box}body{margin:0;background:#f5f3ee;color:#18332e;font-family:BeIN,Arial,sans-serif}header{background:#102f2b;color:#fff;padding:48px max(24px,6vw)}header small{color:#d8ae7d}h1{font-size:clamp(28px,4vw,48px);margin:12px 0}header p{color:#bed0c8;max-width:800px}nav{display:flex;gap:10px;flex-wrap:wrap;margin-top:24px}button,a{font:inherit;border-radius:14px;padding:10px 20px;border:1px solid #d8ae7d;color:#d8ae7d;background:transparent;cursor:pointer;text-decoration:none}button[aria-pressed=true]{background:#d8ae7d;color:#102f2b}main{max-width:1450px;margin:auto;padding:36px 24px}.gallery{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:32px}figure{margin:0}figcaption{margin-bottom:14px;font-size:18px}.phone{max-width:390px;width:100%;border-radius:26px;overflow:hidden;background:white;border:6px solid #18332e;box-shadow:0 14px 32px #102f2b12}.phone img{width:100%;height:auto;display:block}footer{padding:20px 24px 48px;text-align:center;color:#6d7974}body.night{background:#0d1d1a;color:#f5f3ee}body.night .phone{border-color:#38574a}.note{font-size:13px;color:#6d7974;margin:0 0 30px}
+</style></head>
+<body>
+<header><small>YEMEN DRIVE / شريك الطريق</small><h1>ليل صنعاء. هوية جديدة للطريق.</h1><p>أخضر داكن، تفاصيل نحاسية، ومساحات هادئة تضع الرحلة في المقدمة. صور فعلية من واجهات التطبيق الجديد.</p><nav><button id="day" aria-pressed="true">الوضع الفاتح</button><button id="night" aria-pressed="false">الرئيسية بالوضع الداكن</button><a href="../build/app/outputs/flutter-apk/app-arm64-v8a-release.apk">تحميل Android · ARM64</a></nav></header>
+<main><p class="note">بيانات الصور تجريبية للاختبار. هذه الصفحة معرض صور؛ تسجيل الدخول والعمل الفعلي يتمان من التطبيق.</p><section class="gallery">
+<figure><figcaption>01 / تسجيل الدخول</figcaption><div class="phone"><img src="previews/login.png" alt="شاشة الدخول"></div></figure>
+<figure><figcaption>02 / لوحة السائق</figcaption><div class="phone"><img id="home" src="previews/home.png" alt="الرئيسية وبطاقة طلب رحلة"></div></figure>
+<figure><figcaption>03 / المحفظة</figcaption><div class="phone"><img src="previews/wallet.png" alt="رصيد المحفظة وحركاتها"></div></figure>
+<figure><figcaption>04 / سجل الرحلات</figcaption><div class="phone"><img src="previews/history.png" alt="سجل الرحلات"></div></figure>
+<figure><figcaption>05 / التحصيل النقدي</figcaption><div class="phone"><img src="previews/payment.png" alt="تفاصيل التحصيل النقدي"></div></figure>
+</section></main><footer>يمن درايف للسائق · تصميم ليل صنعاء</footer>
+<script>for(const mode of ['day','night'])document.getElementById(mode).onclick=()=>{document.body.classList.toggle('night',mode==='night');document.getElementById('home').src=mode==='night'?'previews/home-dark.png':'previews/home.png';for(const key of ['day','night'])document.getElementById(key).setAttribute('aria-pressed',String(mode===key));};</script>
+</body></html>
