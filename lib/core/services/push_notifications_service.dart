@@ -9,9 +9,11 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:get/get.dart';
 
 import '../network/api_client.dart';
+import '../config/app_environment.dart';
 import '../network/api_endpoints.dart';
 import '../storage/secure_storage_service.dart';
 import 'auth_session_service.dart';
+import 'ride_request_alert.dart';
 
 const String pushNotificationChannelId = 'yemendrive_alerts';
 
@@ -20,6 +22,13 @@ Future<void> firebasePushBackgroundHandler(RemoteMessage message) async {
   // Android presents notification payloads in the system tray while the app is
   // in the background. Keep this entry point initialized for data callbacks.
   await Firebase.initializeApp();
+  if (message.data['action'] == 'open_ride_offer') {
+    AppEnvironment.configure(baseUrl: AppEnvironment.defaultBaseUrl);
+    final client = await ApiClient(SecureStorageService()).init();
+    try {
+      await showVerifiedRideRequestAlert(client, message.data);
+    } finally { client.dio.close(); }
+  }
 }
 
 class PushNotificationsService extends GetxService with WidgetsBindingObserver {
@@ -299,6 +308,11 @@ class PushNotificationsService extends GetxService with WidgetsBindingObserver {
   }
 
   Future<void> _showForegroundNotification(RemoteMessage message) async {
+    if (message.data['action'] == 'open_ride_offer') {
+      await showVerifiedRideRequestAlert(_client, message.data,
+          notifications: _localNotifications);
+      return;
+    }
     final notification = message.notification;
     if (notification == null) return;
     final payload = Map<String, Object?>.from(message.data);
@@ -326,6 +340,19 @@ class PushNotificationsService extends GetxService with WidgetsBindingObserver {
       ),
       payload: jsonEncode(payload),
     );
+  }
+
+  Future<void> showRideRequestNotification(Map<String, Object?> notification) async {
+    if (!_isEligible) return;
+    try {
+      final data = jsonDecode('${notification['dataJson'] ?? '{}'}');
+      if (data is! Map || data['action'] != 'open_ride_offer') return;
+      await showVerifiedRideRequestAlert(_client, {
+        ...Map<String, dynamic>.from(data),
+        'notificationId': notification['id'], 'title': notification['title'],
+        'body': notification['body'], 'createdAtUtc': notification['createdAtUtc'],
+      }, notifications: _localNotifications);
+    } on Object { /* Malformed legacy notifications do not alert. */ }
   }
 
   void _openPayload(String? payload) {

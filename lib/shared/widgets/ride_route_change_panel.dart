@@ -314,8 +314,8 @@ class _RideRouteChangePanelState extends State<RideRouteChangePanel>
           if (request.isOpen)
             const Text(
                 'تستمر الرحلة بوجهتها الحالية حتى موافقة الطرف الآخر. يُعاد التسعير عند تحرك السيارة أو انتهاء العرض.'),
-          if ((request.canConfirm && request.requestedByMe) ||
-              (request.canDecide && !request.requestedByMe))
+          if ((request.canConfirm && request.requestedByMe && !widget.isDriver) ||
+              (request.canDecide && !request.requestedByMe && widget.isDriver))
             FilledButton(
                 onPressed: blocked ? null : () => _review(request),
                 child: const Text('مراجعة الفاتورة والموافقة')),
@@ -325,7 +325,7 @@ class _RideRouteChangePanelState extends State<RideRouteChangePanel>
                     ? null
                     : () => _mutate('cancel', requestId: request.id),
                 child: const Text('سحب طلب تغيير الوجهة')),
-          if (request.canDecide && !request.requestedByMe)
+          if (request.canDecide && !request.requestedByMe && widget.isDriver)
             TextButton(
                 onPressed: blocked
                     ? null
@@ -340,7 +340,7 @@ class _RideRouteChangePanelState extends State<RideRouteChangePanel>
               onPressed: _busy ? null : _refresh,
               child: const Text('تحديث حالة العرض')),
         if (_busy) const LinearProgressIndicator(),
-        if (snapshot.canRequest)
+        if (snapshot.canRequest && !widget.isDriver)
           OutlinedButton.icon(
               onPressed:
                   _busy || _reviewing || _stale ? null : _selectDestination,

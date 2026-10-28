@@ -33,11 +33,28 @@ abstract interface class DriverRepository {
   });
   Future<List<Map<String, Object?>>> notifications();
   Future<void> markNotificationRead(int notificationId);
+  Future<bool> isRequestAvailable(int rideId);
+  Future<Map<String, Object?>> requestRideCancellation(int rideId, String reason);
+  Future<Map<String, Object?>> getCancellationRequest(int requestId);
 }
 
 class ApiDriverRepository implements DriverRepository {
   const ApiDriverRepository(this._provider);
   final DriverProvider _provider;
+
+  @override
+  Future<bool> isRequestAvailable(int rideId) async =>
+      (await _provider.executeData('RideRequestAvailabilityModel', 'get',
+          {'rideId': rideId}))['available'] == true;
+
+  @override
+  Future<Map<String, Object?>> requestRideCancellation(int rideId, String reason) =>
+      _provider.executeData('RideCancellationRequestModel', 'add',
+          {'rideId': rideId, 'reason': reason});
+
+  @override
+  Future<Map<String, Object?>> getCancellationRequest(int requestId) =>
+      _provider.executeData('RideCancellationRequestModel', 'get', {'id': requestId});
 
   @override
   Future<Map<String, Object?>> getRide(int rideId) async {

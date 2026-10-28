@@ -42,7 +42,7 @@ class _DriverHomeViewState extends State<DriverHomeView> {
                     .where(_mine)
                     .where(
                       (r) =>
-                          [3, 4, 5, 8].contains(int.tryParse('${r['status']}')),
+                          [3, 4, 5, 8, 9].contains(int.tryParse('${r['status']}')),
                     )
                     .length;
                 return RefreshIndicator(

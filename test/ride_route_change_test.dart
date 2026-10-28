@@ -37,7 +37,7 @@ Map<String, Object?> routeSnapshot(
               'newDestinationLongitude': 44.219,
               'changeLatitude': 15.3,
               'changeLongitude': 44.1,
-          'invoice': <String, Object?>{
+              'invoice': <String, Object?>{
                 'previousTotal': 1100,
                 'completedDistanceMeters': 1000,
                 'completedFare': 250,
@@ -77,12 +77,13 @@ const destination = RideRouteDestination(
     latitude: 15.476, longitude: 44.219, label: 'مطار صنعاء');
 
 Future<void> mountRoute(WidgetTester tester,
-    {Future<void> Function()? changed}) async {
+    {Future<void> Function()? changed, bool isDriver = false}) async {
   await tester.pumpWidget(MaterialApp(
       home: Scaffold(
           body: SingleChildScrollView(
     child: RideRouteChangePanel(
         rideId: 7,
+        isDriver: isDriver,
         selectDestination: () async => destination,
         onRouteChanged: changed),
   ))));
@@ -175,7 +176,7 @@ void main() {
         state = routeSnapshot(status: 'accepted', mine: false, version: 1);
       return state;
     };
-    await mountRoute(tester);
+    await mountRoute(tester, isDriver: true);
     expect(find.text('اختيار وجهة جديدة وعرض الفاتورة'), findsNothing);
     await tester.tap(find.text('مراجعة الفاتورة والموافقة'));
     await tester.pumpAndSettle();
@@ -193,7 +194,7 @@ void main() {
     final api = Get.put<ApiClient>(RouteApi()) as RouteApi;
     var state = routeSnapshot(status: 'pending', mine: false);
     api.handle = (_, body) async => state;
-    await mountRoute(tester);
+    await mountRoute(tester, isDriver: true);
     await tester.tap(find.text('مراجعة الفاتورة والموافقة'));
     await tester.pumpAndSettle();
     state = routeSnapshot(status: 'pending', mine: false, id: 10);

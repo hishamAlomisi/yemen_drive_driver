@@ -10,9 +10,11 @@ import 'package:get/get.dart';
 import '../../../core/network/api_models.dart';
 import '../../../core/realtime/tracking_hub_service.dart';
 import '../../../core/services/auth_session_service.dart';
+import '../../../core/services/push_notifications_service.dart';
 import '../driver_routes.dart';
 import '../repositories/driver_repository.dart';
 import '../views/driver_payment_view.dart';
+import '../views/driver_notifications_view.dart';
 
 /// The latest verified passenger GPS sample for one assigned ride.
 ///
@@ -72,8 +74,11 @@ class DriverController extends GetxController {
   bool _locationUpdateInFlight = false;
   DateTime? _lastLocationSentAt;
   Position? _lastSentPosition;
+  final Map<int, int> _requestVersions = {};
+  int _requestSnapshotVersion = 0;
+  final cancellationRequestsInFlight = <int>{}.obs;
 
-  static const _trackableRideStatuses = <int>{3, 4, 5, 8};
+  static const _trackableRideStatuses = <int>{3, 4, 5, 8, 9};
 
   int? get currentUserId => _session.currentUserId.value;
 
@@ -120,13 +125,13 @@ class DriverController extends GetxController {
           int.tryParse('${payload['cancellationRequestId'] ?? ''}');
       if (cancellationId != null &&
           _cancellationNotificationActionable(rideId)) {
-        _showCancellationDecision(cancellationId);
+        showNotifications();
         return;
       }
       final cashPaymentId =
           int.tryParse('${payload['cashPaymentRequestId'] ?? ''}');
       if (cashPaymentId != null) {
-        _showCashPaymentDecision(cashPaymentId, rideId);
+        showNotifications();
         return;
       }
       if (rideId != null) {
@@ -147,14 +152,14 @@ class DriverController extends GetxController {
     if (cancellationId != null &&
         notification['isRead'] != true &&
         _cancellationNotificationActionable(notificationRideId(notification))) {
-      _showCancellationDecision(cancellationId);
+      showNotifications();
       return;
     }
     final cashPaymentId = cashPaymentRequestId(notification);
     final notificationRideIdValue = notificationRideId(notification);
     if (cashPaymentId != null &&
         _cashNotificationActionable(notification, notificationRideIdValue)) {
-      _showCashPaymentDecision(cashPaymentId, notificationRideIdValue);
+      showNotifications();
       return;
     }
     if (notificationRideIdValue != null)
@@ -191,7 +196,7 @@ class DriverController extends GetxController {
     }
     final payload = event.payload;
     if (event.name == 'notificationCreated') {
-      unawaited(_refreshNotifications());
+      unawaited(_refreshNotifications(announceRequests: true));
       return;
     }
     final rideId = int.tryParse('${payload['id'] ?? payload['rideId'] ?? ''}');
@@ -203,10 +208,11 @@ class DriverController extends GetxController {
     }
 
     if (event.name == 'rideAvailable') {
-      _upsertRide(payload, rideId);
+      unawaited(receiveAvailableRequest(payload, rideId));
       return;
     }
     if (event.name == 'rideUnavailable') {
+      _requestVersions[rideId] = (_requestVersions[rideId] ?? 0) + 1;
       rides.removeWhere((ride) =>
           int.tryParse('${ride['id']}') == rideId &&
           '${ride['driverId'] ?? ''}' != '${currentUserId ?? ''}');
@@ -220,6 +226,12 @@ class DriverController extends GetxController {
     }
     if (event.name == 'rideStatusUpdated') {
       final rideStatus = int.tryParse('${payload['rideStatus'] ?? ''}');
+      if (rideStatus != null && rideStatus != 1 && rideStatus != 2) {
+        _requestVersions[rideId] = (_requestVersions[rideId] ?? 0) + 1;
+      }
+      if (rideStatus == 6 || rideStatus == 7) {
+        unawaited(load(showLoading: false));
+      }
       final index =
           rides.indexWhere((ride) => int.tryParse('${ride['id']}') == rideId);
       if (rideStatus != null && index >= 0) {
@@ -246,6 +258,9 @@ class DriverController extends GetxController {
     final assignedDriverId =
         int.tryParse('${payload['assignedDriverId'] ?? ''}');
     final rideStatus = int.tryParse('${payload['rideStatus'] ?? ''}');
+    if (rideStatus == 3) {
+      _requestVersions[rideId] = (_requestVersions[rideId] ?? 0) + 1;
+    }
     if (rideStatus == 3 && assignedDriverId == currentUserId) {
       final rawRide = payload['rideSnapshot'];
       if (rawRide is Map<Object?, Object?>) {
@@ -343,6 +358,58 @@ class DriverController extends GetxController {
     }
   }
 
+  /// A delayed Hub event must pass the same check as a push notification.
+  Future<void> receiveAvailableRequest(Map<String, Object?> payload, int rideId) async {
+    final snapshotVersion = _requestSnapshotVersion;
+    final version = (_requestVersions[rideId] ?? 0) + 1;
+    _requestVersions[rideId] = version;
+    try {
+      if (!await _repository.isRequestAvailable(rideId) ||
+          _requestVersions[rideId] != version ||
+          _requestSnapshotVersion != snapshotVersion || isClosed) return;
+      _upsertRide(payload, rideId);
+      await _refreshNotifications(announceRequests: true);
+    } on Object {
+      // A reconnect snapshot will retry; an unverified event is never displayed.
+    }
+  }
+
+  Future<void> requestCancellation(Map<String, Object?> ride) async {
+    final id = int.tryParse('${ride['id']}');
+    if (id == null || cancellationRequestsInFlight.contains(id)) return;
+    final reason = TextEditingController();
+    final submitted = await Get.dialog<String>(AlertDialog(
+      title: const Text('إلغاء الرحلة'),
+      content: Column(mainAxisSize: MainAxisSize.min, children: [
+        Text('${ride['status']}' == '5'
+            ? 'يُرسل الطلب إلى الراكب، وتستمر الرحلة حتى موافقته.'
+            : 'سيتم إلغاء الرحلة قبل بدءها.'),
+        TextField(controller: reason, maxLength: 1000,
+            decoration: const InputDecoration(labelText: 'سبب الإلغاء')),
+      ]),
+      actions: [
+        TextButton(onPressed: () => Get.back<String>(), child: const Text('رجوع')),
+        FilledButton(onPressed: () {
+          if (reason.text.trim().length >= 3) Get.back(result: reason.text.trim());
+        }, child: const Text('إرسال')),
+      ],
+    ));
+    unawaited(Future<void>.delayed(const Duration(milliseconds: 400), reason.dispose));
+    // Dialog reverse animations may still be reading the editing value.
+    if (submitted == null) return;
+    cancellationRequestsInFlight.add(id);
+    try {
+      final result = await _repository.requestRideCancellation(id, submitted);
+      Get.snackbar('تم تسجيل الطلب', '${result['rideStatus']}' == '7'
+          ? 'أُلغيت الرحلة وأصبحت متاحاً.' : 'بانتظار موافقة الراكب. تستمر الرحلة حالياً.');
+      await load(showLoading: false);
+    } on Object {
+      Get.snackbar('تعذر إلغاء الرحلة', 'تحقق من حالة الرحلة ثم أعد المحاولة.');
+    } finally {
+      cancellationRequestsInFlight.remove(id);
+    }
+  }
+
   /// Coalesce updates without losing an approval that arrives during a fetch.
   Future<void> refreshRide(int rideId) {
     _rideRefreshRequested.add(rideId);
@@ -379,6 +446,8 @@ class DriverController extends GetxController {
   Future<void> load({bool showLoading = true}) async {
     if (_refreshInFlight) return;
     _refreshInFlight = true;
+    // A fresh reconnect snapshot supersedes earlier invitation verification.
+    _requestSnapshotVersion++;
     if (showLoading) {
       isLoading.value = true;
       error.value = null;
@@ -559,9 +628,14 @@ class DriverController extends GetxController {
     }
   }
 
-  Future<void> _refreshNotifications() async {
+  Future<void> _refreshNotifications({bool announceRequests = false}) async {
     try {
       notifications.assignAll(await _repository.notifications());
+      if (announceRequests && Get.isRegistered<PushNotificationsService>()) {
+        for (final item in notifications) {
+          await Get.find<PushNotificationsService>().showRideRequestNotification(item);
+        }
+      }
     } catch (_) {
       // The notification snapshot remains available if this request fails.
     }
@@ -835,7 +909,7 @@ class DriverController extends GetxController {
       Map<String, Object?>? activeRide;
       for (final ride in rides) {
         if ('${ride['driverId'] ?? ''}' == '$driverId' &&
-            <int>{3, 4, 5, 8}.contains(int.tryParse('${ride['status']}'))) {
+            <int>{3, 4, 5, 8, 9}.contains(int.tryParse('${ride['status']}'))) {
           activeRide = ride;
           break;
         }
@@ -876,6 +950,12 @@ class DriverController extends GetxController {
 
   int get unreadNotifications =>
       notifications.where((item) => item['isRead'] != true).length;
+
+  Future<Map<String, Object?>> getCancellationRequest(int id) =>
+      _repository.getCancellationRequest(id);
+
+  bool cashNotificationActionable(Map<String, Object?> item) =>
+      _cashNotificationActionable(item, notificationRideId(item));
 
   int? cancellationRequestId(Map<String, Object?> notification) {
     final raw = notification['dataJson']?.toString();
@@ -1010,57 +1090,7 @@ class DriverController extends GetxController {
   }
 
   void showNotifications() {
-    Get.dialog<void>(AlertDialog(
-      title: Text('الإشعارات ($unreadNotifications)'),
-      content: SizedBox(
-        width: double.maxFinite,
-        child: notifications.isEmpty
-            ? const Text('لا توجد إشعارات.')
-            : ListView.builder(
-                shrinkWrap: true,
-                itemCount: notifications.length,
-                itemBuilder: (_, index) {
-                  final item = notifications[index];
-                  final cancellationId = cancellationRequestId(item);
-                  final cashPaymentId = cashPaymentRequestId(item);
-                  final rideId = notificationRideId(item);
-                  final cashActionable = cashPaymentId != null &&
-                      _cashNotificationActionable(item, rideId);
-                  final cancellationActionable = cancellationId != null &&
-                      item['isRead'] != true &&
-                      _cancellationNotificationActionable(rideId);
-                  return ListTile(
-                    leading: Icon(
-                      item['isRead'] == true ||
-                              (cashPaymentId != null && !cashActionable)
-                          ? Icons.notifications_none
-                          : Icons.notifications_active,
-                    ),
-                    title: Text('${item['title'] ?? ''}'),
-                    subtitle: Text('${item['body'] ?? ''}'),
-                    trailing: cancellationId != null
-                        ? const Icon(Icons.gavel_outlined)
-                        : cashPaymentId != null
-                            ? Icon(Icons.payments_outlined,
-                                color: cashActionable ? null : Colors.grey)
-                            : null,
-                    onTap: cancellationActionable
-                        ? () => _showCancellationDecision(cancellationId)
-                        : cashActionable
-                            ? () =>
-                                _showCashPaymentDecision(cashPaymentId, rideId)
-                            : () => markNotificationRead(item),
-                  );
-                },
-              ),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Get.back<void>(),
-          child: const Text('إغلاق'),
-        ),
-      ],
-    ));
+    Get.to<void>(() => const DriverNotificationsView());
   }
 
   Future<void> markNotificationRead(Map<String, Object?> item) async {
@@ -1090,51 +1120,6 @@ class DriverController extends GetxController {
     if (ride == null) return true;
     final status = int.tryParse('${ride['status']}');
     return status == 8;
-  }
-
-  void _showCashPaymentDecision(int requestId, int? rideId) {
-    if (Get.isDialogOpen ?? false) Get.back<void>();
-    Get.dialog<void>(
-      AlertDialog(
-        title: const Text('تأكيد دفع نقدي'),
-        content: const Text(
-            'هل استلمت المبلغ النقدي من العميل؟ عند التأكيد افتح الرحلة وسجل التحصيل بالمبلغ الفعلي.'),
-        actions: <Widget>[
-          TextButton(
-              onPressed: () =>
-                  decideCashPaymentRequest(requestId, false, rideId),
-              child: const Text('لم أستلم المبلغ')),
-          FilledButton(
-              onPressed: () =>
-                  decideCashPaymentRequest(requestId, true, rideId),
-              child: const Text('نعم، استلمته')),
-        ],
-      ),
-      barrierDismissible: false,
-    );
-  }
-
-  void _showCancellationDecision(int requestId) {
-    if (Get.isDialogOpen ?? false) Get.back<void>();
-    Get.dialog<void>(
-      AlertDialog(
-        title: const Text('طلب إلغاء الرحلة'),
-        content: const Text(
-            'اختر القرار المناسب. القبول أو الإحالة ينقلان الطلب إلى الإدارة؛ الرفض وحده يسمح للعميل بإعادة الطلب.'),
-        actions: <Widget>[
-          TextButton(
-              onPressed: () => decideCancellation(requestId, 'reject'),
-              child: const Text('رفض')),
-          OutlinedButton(
-              onPressed: () => decideCancellation(requestId, 'refer'),
-              child: const Text('رفض وإحالة للإدارة')),
-          FilledButton(
-              onPressed: () => decideCancellation(requestId, 'accept'),
-              child: const Text('قبول')),
-        ],
-      ),
-      barrierDismissible: false,
-    );
   }
 
   @override

@@ -10,7 +10,6 @@ import '../../../shared/widgets/ride_waiting_panel.dart';
 import '../../../shared/widgets/ride_route_change_panel.dart';
 import '../controllers/driver_controller.dart';
 import '../repositories/route_repository.dart';
-import '../widgets/driver_route_destination_picker.dart';
 
 /// In-app navigation preview for the assigned driver's pickup or destination.
 /// GPS stays local for the driver's marker; SignalR publishes that same fix to
@@ -394,10 +393,7 @@ class _DriverNavigationViewState extends State<DriverNavigationView> {
                     RideRouteChangePanel(
                       rideId: _rideId,
                       isDriver: true,
-                      selectDestination: () => selectDriverRouteDestination(
-                        context,
-                        _ride ?? const {},
-                      ),
+                      selectDestination: () async => null,
                       onRouteChanged: () =>
                           _driverController.refreshRide(_rideId),
                     ),

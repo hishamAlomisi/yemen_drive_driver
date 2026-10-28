@@ -6,7 +6,6 @@ import '../views/driver_chat_view.dart';
 import 'driver_design.dart';
 import '../../../shared/widgets/ride_waiting_panel.dart';
 import '../../../shared/widgets/ride_route_change_panel.dart';
-import 'driver_route_destination_picker.dart';
 
 class DriverRideCard extends GetView<DriverController> {
   const DriverRideCard({required this.ride, super.key});
@@ -34,6 +33,7 @@ class DriverRideCard extends GetView<DriverController> {
       6: 'مكتملة',
       7: 'ملغاة',
       8: 'طلب إلغاء قيد المراجعة',
+      9: 'وصل السائق إلى نقطة الانطلاق',
     };
     return Card(
       margin: const EdgeInsets.only(bottom: 16),
@@ -128,8 +128,7 @@ class DriverRideCard extends GetView<DriverController> {
                 key: ValueKey('route-change-${ride['id']}'),
                 rideId: int.parse('${ride['id']}'),
                 isDriver: true,
-                selectDestination: () =>
-                    selectDriverRouteDestination(context, ride),
+                selectDestination: () async => null,
                 onRouteChanged: () =>
                     controller.refreshRide(int.parse('${ride['id']}')),
               ),
@@ -194,6 +193,12 @@ class DriverRideCard extends GetView<DriverController> {
               ),
             if (assigned && state == 4)
               FilledButton.icon(
+                onPressed: () => controller.updateStatus(ride, 9, 'وصلت إلى نقطة الانطلاق'),
+                icon: const Icon(Icons.place_outlined),
+                label: const Text('تأكيد الوصول إلى الراكب'),
+              ),
+            if (assigned && state == 9)
+              FilledButton.icon(
                 onPressed: () =>
                     controller.updateStatus(ride, 5, 'بدأت الرحلة'),
                 icon: const Icon(Icons.play_arrow),
@@ -242,7 +247,7 @@ class DriverRideCard extends GetView<DriverController> {
                 icon: const Icon(Icons.payments_outlined),
                 label: const Text('تسجيل تحصيل نقدي بطلب العميل'),
               ),
-            if (assigned && state == 4)
+            if (assigned && (state == 4 || state == 9))
               OutlinedButton.icon(
                 onPressed: () => Get.to<void>(
                   () => DriverChatView(rideId: '${ride['id']}'),
@@ -250,11 +255,17 @@ class DriverRideCard extends GetView<DriverController> {
                 icon: const Icon(Icons.chat_bubble_outline),
                 label: const Text('محادثة العميل'),
               ),
-            if (assigned && (state == 3 || state == 4))
+            if (assigned && (state == 3 || state == 4 || state == 9))
               OutlinedButton.icon(
                 onPressed: () => _callCustomer(ride['customerPhone']),
                 icon: const Icon(Icons.phone_outlined),
                 label: const Text('اتصال بالعميل'),
+              ),
+            if (assigned && {3, 4, 5, 9}.contains(state))
+              OutlinedButton.icon(
+                onPressed: () => controller.requestCancellation(ride),
+                icon: const Icon(Icons.cancel_outlined),
+                label: Text(state == 5 ? 'طلب إلغاء الرحلة' : 'إلغاء الرحلة'),
               ),
           ],
         ),
