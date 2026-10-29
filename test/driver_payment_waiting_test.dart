@@ -61,6 +61,37 @@ Future<void> collect(WidgetTester tester) async {
 }
 
 void main() {
+  for (final state in ['paymentCompleted', 'walletPaymentPending']) {
+    testWidgets('$state arriving after opening cash screen prevents collection',
+        (tester) async {
+      final repository = PaymentRepository();
+      await mount(tester, repository);
+      repository.latest = {
+        ...ride(),
+        state: true,
+        'paymentMethodNameAr': 'جيب',
+        'paymentProvider': 'Jaib',
+      };
+      await collect(tester);
+      expect(repository.collections, isEmpty);
+      if (state == 'paymentCompleted') {
+        expect(find.text('تسجيل التحصيل فقط'), findsNothing);
+        expect(find.byType(TextField), findsNothing);
+        expect(find.text('تم الدفع عبر جيب'), findsOneWidget);
+        expect(
+            find.textContaining('إجمالي مديونيتك بعد التحصيل'), findsNothing);
+      } else {
+        final button = tester.widget<FilledButton>(find.ancestor(
+          of: find.text('تسجيل التحصيل فقط'),
+          matching: find.byType(FilledButton),
+        ));
+        expect(button.onPressed, isNull);
+        expect(
+            tester.widget<TextField>(find.byType(TextField)).enabled, isFalse);
+      }
+    });
+  }
+
   testWidgets('changed route at the same price requires another fare review',
       (tester) async {
     final repository = PaymentRepository();

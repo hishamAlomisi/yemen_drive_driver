@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../controllers/driver_controller.dart';
+import '../models/driver_ride_payment_state.dart';
 import '../views/driver_chat_view.dart';
 import 'driver_design.dart';
 import '../../../shared/widgets/ride_waiting_panel.dart';
@@ -15,6 +16,7 @@ class DriverRideCard extends GetView<DriverController> {
     final assigned =
         ride['driverId']?.toString() == controller.currentUserId?.toString();
     final state = int.tryParse('${ride['status']}') ?? 0;
+    final payment = DriverRidePaymentState(ride);
     final offerStatus = int.tryParse('${ride['driverOfferStatus']}');
     final canSendOrEditOffer = !assigned &&
         ride['driverId'] == null &&
@@ -116,6 +118,21 @@ class DriverRideCard extends GetView<DriverController> {
                 child: Text(
                     'نطاق التفاوض: ${ride['minCustomerPrice']} – ${ride['maxCustomerPrice']} ر.ي'),
               ),
+            if (assigned &&
+                {3, 4, 9, 5, 6}.contains(state) &&
+                payment.message != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 12),
+                child: Text(
+                  payment.message!,
+                  style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                    color: payment.completed
+                        ? Theme.of(context).colorScheme.primary
+                        : null,
+                  ),
+                ),
+              ),
             if (assigned && state == 5) ...[
               const SizedBox(height: 16),
               RideWaitingPanel(
@@ -193,34 +210,38 @@ class DriverRideCard extends GetView<DriverController> {
               ),
             if (assigned && state == 4)
               FilledButton.icon(
-                onPressed: () => controller.updateStatus(ride, 9, 'وصلت إلى نقطة الانطلاق'),
+                onPressed: () =>
+                    controller.updateStatus(ride, 9, 'وصلت إلى نقطة الانطلاق'),
                 icon: const Icon(Icons.place_outlined),
                 label: const Text('تأكيد الوصول إلى الراكب'),
               ),
             if (assigned && state == 9)
               FilledButton.icon(
-                onPressed: () =>
-                    controller.updateStatus(ride, 5, 'بدأت الرحلة'),
+                onPressed: payment.startBlocked
+                    ? null
+                    : () => controller.updateStatus(ride, 5, 'بدأت الرحلة'),
                 icon: const Icon(Icons.play_arrow),
                 label: const Text('بدء الرحلة'),
               ),
             if (assigned && state == 5) ...[
-              FilledButton.icon(
-                onPressed: ride['paymentCompleted'] == true
-                    ? null
-                    : () => controller.openCashPayment(ride),
-                icon: const Icon(Icons.payments_outlined),
-                label: const Text('تحصيل الدفع'),
-              ),
-              const SizedBox(height: 8),
-              FilledButton.icon(
-                onPressed: ride['paymentCompleted'] == true
-                    ? null
-                    : () => controller.enableCustomerPayment(ride),
-                icon: const Icon(Icons.credit_score_outlined),
-                label: const Text('تمكين طرق الدفع للعميل'),
-              ),
-              const SizedBox(height: 8),
+              if (!payment.completed) ...[
+                FilledButton.icon(
+                  onPressed: payment.pending
+                      ? null
+                      : () => controller.openCashPayment(ride),
+                  icon: const Icon(Icons.payments_outlined),
+                  label: const Text('تحصيل الدفع'),
+                ),
+                const SizedBox(height: 8),
+                FilledButton.icon(
+                  onPressed: payment.pending
+                      ? null
+                      : () => controller.enableCustomerPayment(ride),
+                  icon: const Icon(Icons.credit_score_outlined),
+                  label: const Text('تمكين طرق الدفع للعميل'),
+                ),
+                const SizedBox(height: 8),
+              ],
               FilledButton.icon(
                 onPressed: () => controller.updateStatus(ride, 6, 'مكتملة'),
                 icon: const Icon(Icons.flag_rounded),
@@ -241,7 +262,11 @@ class DriverRideCard extends GetView<DriverController> {
                 label: const Text('اتصال بالعميل'),
               ),
             ],
-            if (assigned && state == 6 && ride['cashPaymentRequestStatus'] == 1)
+            if (assigned &&
+                state == 6 &&
+                ride['cashPaymentRequestStatus'] == 1 &&
+                ride['paymentCompleted'] != true &&
+                ride['walletPaymentPending'] != true)
               OutlinedButton.icon(
                 onPressed: () => controller.openCashPayment(ride),
                 icon: const Icon(Icons.payments_outlined),

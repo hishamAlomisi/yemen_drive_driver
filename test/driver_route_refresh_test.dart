@@ -50,6 +50,33 @@ DriverController controller(RouteRepositoryFake repository) {
 void main() {
   tearDown(() => Get.reset());
 
+  test('payment refresh carries pending and final paid state to ride card',
+      () async {
+    final repository = RouteRepositoryFake();
+    final subject = controller(repository);
+    subject.rides.add(ride(0));
+    final pending = subject.refreshRide(7);
+    repository.requests[0].complete({
+      ...ride(0),
+      'walletPaymentPending': true,
+      'paymentCompleted': false,
+    });
+    await pending;
+    expect(subject.rides.single['walletPaymentPending'], isTrue);
+    final completed = subject.refreshRide(7);
+    repository.requests[1].complete({
+      ...ride(0),
+      'walletPaymentPending': false,
+      'paymentCompleted': true,
+      'paymentMethodNameAr': 'فلوسك',
+      'paymentProvider': 'Floosak',
+    });
+    await completed;
+    expect(subject.rides.single['walletPaymentPending'], isFalse);
+    expect(subject.rides.single['paymentCompleted'], isTrue);
+    expect(subject.rides.single['paymentMethodNameAr'], 'فلوسك');
+  });
+
   test('approval refresh updates destination and total together', () async {
     final repository = RouteRepositoryFake();
     final subject = controller(repository);
@@ -107,5 +134,36 @@ void main() {
     repository.requests[1].complete(ride(1));
     await retry;
     expect(subject.rides.single['routeVersion'], 2);
+  });
+
+  test(
+      'stale list cannot reopen payment after a settled refresh at the same fare',
+      () async {
+    final repository = RouteRepositoryFake();
+    final subject = controller(repository);
+    subject.rides.add({...ride(0), 'paymentCompleted': false});
+    final load = subject.load(showLoading: false);
+    final refresh = subject.refreshRide(7);
+    repository.requests.single.complete({
+      ...ride(0),
+      'paymentCompleted': true,
+      'paymentMethodNameAr': 'جيب',
+      'paymentProvider': 'Jaib',
+      'paymentRequiredBeforeStart': false,
+    });
+    await refresh;
+    repository.listRequest.complete(DriverSnapshot(profile: null, rides: [
+      {
+        ...ride(0),
+        'paymentCompleted': false,
+        'paymentRequiredBeforeStart': true,
+        'customerPaymentEnabled': true
+      },
+    ]));
+    await load;
+    expect(subject.rides.single['paymentCompleted'], isTrue);
+    expect(subject.rides.single['paymentMethodNameAr'], 'جيب');
+    expect(subject.rides.single['paymentRequiredBeforeStart'], isFalse);
+    expect(subject.paymentEnabledRideIds, isEmpty);
   });
 }

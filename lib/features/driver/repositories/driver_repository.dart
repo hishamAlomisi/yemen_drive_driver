@@ -34,7 +34,8 @@ abstract interface class DriverRepository {
   Future<List<Map<String, Object?>>> notifications();
   Future<void> markNotificationRead(int notificationId);
   Future<bool> isRequestAvailable(int rideId);
-  Future<Map<String, Object?>> requestRideCancellation(int rideId, String reason);
+  Future<Map<String, Object?>> requestRideCancellation(
+      int rideId, String reason);
   Future<Map<String, Object?>> getCancellationRequest(int requestId);
 }
 
@@ -45,16 +46,19 @@ class ApiDriverRepository implements DriverRepository {
   @override
   Future<bool> isRequestAvailable(int rideId) async =>
       (await _provider.executeData('RideRequestAvailabilityModel', 'get',
-          {'rideId': rideId}))['available'] == true;
+          {'rideId': rideId}))['available'] ==
+      true;
 
   @override
-  Future<Map<String, Object?>> requestRideCancellation(int rideId, String reason) =>
+  Future<Map<String, Object?>> requestRideCancellation(
+          int rideId, String reason) =>
       _provider.executeData('RideCancellationRequestModel', 'add',
           {'rideId': rideId, 'reason': reason});
 
   @override
   Future<Map<String, Object?>> getCancellationRequest(int requestId) =>
-      _provider.executeData('RideCancellationRequestModel', 'get', {'id': requestId});
+      _provider.executeData(
+          'RideCancellationRequestModel', 'get', {'id': requestId});
 
   @override
   Future<Map<String, Object?>> getRide(int rideId) async {
@@ -67,7 +71,10 @@ class ApiDriverRepository implements DriverRepository {
     if (ride is! Map || '${ride['id']}' != '$rideId') {
       throw const FormatException('تعذر تأكيد بيانات الرحلة من الخادم.');
     }
-    return Map<String, Object?>.from(ride);
+    return <String, Object?>{
+      ...Map<String, Object?>.from(ride),
+      ..._paymentState(detail),
+    };
   }
 
   @override
@@ -93,6 +100,31 @@ class ApiDriverRepository implements DriverRepository {
     return <String, Object?>{
       ...Map<String, Object?>.from(ride),
       'waitingIsOpen': waitingSnapshot.isOpen,
+      ..._paymentState(detail),
+    };
+  }
+
+  Map<String, Object?> _paymentState(Map<String, Object?> detail) {
+    Map<Object?, Object?>? paidPayment;
+    final payments = detail['payments'];
+    if (payments is List) {
+      for (final payment in payments) {
+        if (payment is Map &&
+            {'2', 'paid'}.contains('${payment['status']}'.toLowerCase())) {
+          paidPayment = payment;
+          break;
+        }
+      }
+    }
+    return {
+      'paymentCompleted':
+          detail['paymentCompleted'] == true || paidPayment != null,
+      'walletPaymentPending': detail['walletPaymentPending'] == true,
+      'paymentMethodNameAr': detail['paymentMethodNameAr'],
+      'paymentProvider': detail['paymentProvider'] ?? paidPayment?['provider'],
+      if (detail.containsKey('paymentRequiredBeforeStart'))
+        'paymentRequiredBeforeStart':
+            detail['paymentRequiredBeforeStart'] == true,
     };
   }
 

@@ -12,6 +12,7 @@ import '../../../core/realtime/tracking_hub_service.dart';
 import '../../../core/services/auth_session_service.dart';
 import '../../../core/services/push_notifications_service.dart';
 import '../driver_routes.dart';
+import '../models/driver_ride_payment_state.dart';
 import '../repositories/driver_repository.dart';
 import '../views/driver_payment_view.dart';
 import '../views/driver_notifications_view.dart';
@@ -63,6 +64,7 @@ class DriverController extends GetxController {
   final Set<int> _paymentChecksInFlight = <int>{};
   final Map<int, Future<void>> _rideRefreshes = {};
   final Set<int> _rideRefreshRequested = {};
+  final Map<int, int> _rideSnapshotVersions = {};
   StreamSubscription<Position>? _locationSubscription;
   bool _locationPermissionNoticeShown = false;
   StreamSubscription<TrackingHubEvent>? _hubEventSubscription;
@@ -221,6 +223,8 @@ class DriverController extends GetxController {
     if (event.name == 'paymentUpdated') {
       if (paymentEnabledRideIds.contains(rideId)) {
         unawaited(_refreshEnabledPayment(rideId));
+      } else {
+        unawaited(refreshRide(rideId).catchError((Object _) {}));
       }
       return;
     }
@@ -356,6 +360,7 @@ class DriverController extends GetxController {
       if (nextVersion < previousVersion) return;
       rides[index] = {...previous, ...ride};
     }
+    _rideSnapshotVersions[rideId] = (_rideSnapshotVersions[rideId] ?? 0) + 1;
   }
 
   /// A delayed Hub event must pass the same check as a push notification.
@@ -452,6 +457,7 @@ class DriverController extends GetxController {
       isLoading.value = true;
       error.value = null;
     }
+    final versionsAtStart = Map<int, int>.of(_rideSnapshotVersions);
     try {
       final snapshot = await _repository.load(_session.currentUserId.value);
       profile.value = snapshot.profile;
@@ -460,9 +466,12 @@ class DriverController extends GetxController {
       };
       rides.assignAll(snapshot.rides.map((ride) {
         final previous = previousRides['${ride['id']}'];
+        final rideId = int.tryParse('${ride['id']}');
         if (previous != null &&
-            (int.tryParse('${previous['routeVersion']}') ?? 0) >
-                (int.tryParse('${ride['routeVersion']}') ?? 0)) {
+            ((_rideSnapshotVersions[rideId] ?? 0) !=
+                    (versionsAtStart[rideId] ?? 0) ||
+                (int.tryParse('${previous['routeVersion']}') ?? 0) >
+                    (int.tryParse('${ride['routeVersion']}') ?? 0))) {
           return previous;
         }
         return ride;
@@ -470,13 +479,13 @@ class DriverController extends GetxController {
       _prunePassengerLocations();
       paymentEnabledRideIds
         ..clear()
-        ..addAll(snapshot.rides
+        ..addAll(rides
             .where((ride) =>
                 ride['customerPaymentEnabled'] == true &&
                 ride['paymentCompleted'] != true)
             .map((ride) => int.tryParse('${ride['id']}'))
             .whereType<int>());
-      final activeRideIds = snapshot.rides
+      final activeRideIds = rides
           .where(
             (ride) =>
                 ride['driverId']?.toString() ==
@@ -574,6 +583,11 @@ class DriverController extends GetxController {
       Map<String, Object?> ride, int status, String label) async {
     final id = int.tryParse('${ride['id']}');
     if (id == null) return;
+    final payment = DriverRidePaymentState(ride);
+    if (status == 5 && payment.startBlocked) {
+      Get.snackbar('بانتظار الدفع', payment.message!);
+      return;
+    }
     try {
       await _repository.updateRideStatus(rideId: id, status: status);
       Get.snackbar('تم التحديث', 'أصبحت الحالة: $label');
@@ -590,7 +604,11 @@ class DriverController extends GetxController {
 
   Future<void> enableCustomerPayment(Map<String, Object?> ride) async {
     final id = int.tryParse('${ride['id']}');
-    if (id == null || ride['paymentCompleted'] == true) return;
+    if (id == null ||
+        ride['paymentCompleted'] == true ||
+        ride['walletPaymentPending'] == true) {
+      return;
+    }
     try {
       await _repository.updateRideStatus(
           rideId: id,
@@ -605,22 +623,21 @@ class DriverController extends GetxController {
   }
 
   Future<void> _refreshEnabledPayment(int rideId) async {
-    if (!paymentEnabledRideIds.contains(rideId) ||
-        !_paymentChecksInFlight.add(rideId)) {
+    if (!paymentEnabledRideIds.contains(rideId)) return;
+    if (!_paymentChecksInFlight.add(rideId)) {
+      // Keep the newest provider event when the previous detail request is
+      // still running. refreshRide coalesces it into a subsequent fetch.
+      unawaited(refreshRide(rideId).catchError((Object _) {}));
       return;
     }
     try {
-      if (!await _repository.isRidePaymentCompleted(rideId)) return;
+      await refreshRide(rideId);
+      final paidRide = rides
+          .where((ride) => int.tryParse('${ride['id']}') == rideId)
+          .firstOrNull;
+      if (paidRide == null || paidRide['paymentCompleted'] != true) return;
       paymentEnabledRideIds.remove(rideId);
-      final index =
-          rides.indexWhere((ride) => int.tryParse('${ride['id']}') == rideId);
-      if (index >= 0) {
-        rides[index] = <String, Object?>{
-          ...rides[index],
-          'paymentCompleted': true,
-        };
-      }
-      Get.snackbar('تم الدفع', 'تم تأكيد تحصيل مبلغ الرحلة.');
+      Get.snackbar('تم الدفع', DriverRidePaymentState(paidRide).paidMessage);
     } catch (_) {
       // A reconnect or the next payment event can reconcile this state.
     } finally {
@@ -647,6 +664,16 @@ class DriverController extends GetxController {
     Map<String, Object?> latest;
     try {
       latest = await _repository.getRideForPayment(id);
+      _upsertRide(latest, id);
+      if (latest['paymentCompleted'] == true ||
+          latest['walletPaymentPending'] == true) {
+        Get.snackbar(
+            'حالة الدفع',
+            latest['paymentCompleted'] == true
+                ? '${DriverRidePaymentState(latest).paidMessage}؛ يمكنك إنهاء الرحلة عند اكتمالها.'
+                : 'العميل يجري عملية دفع بالمحفظة. انتظر تأكيد النتيجة قبل التحصيل.');
+        return;
+      }
       if (latest['waitingIsOpen'] == true) {
         Get.snackbar('الانتظار مفتوح',
             'استأنف الرحلة أو اسحب طلب الانتظار قبل التحصيل.');

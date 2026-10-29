@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../../../core/network/api_models.dart';
 import '../../../core/realtime/tracking_hub_service.dart';
+import '../models/driver_ride_payment_state.dart';
 import '../repositories/driver_repository.dart';
 import '../widgets/driver_design.dart';
 
@@ -81,6 +82,12 @@ class _DriverPaymentViewState extends State<DriverPaymentView>
   double _number(Object? value) =>
       value is num ? value.toDouble() : double.tryParse('${value ?? ''}') ?? 0;
   bool get _waitingIsOpen => _ride['waitingIsOpen'] == true;
+  bool get _paymentCompleted => _ride['paymentCompleted'] == true;
+  bool get _walletPaymentPending => _ride['walletPaymentPending'] == true;
+  bool get _collectionBlocked => _paymentCompleted || _walletPaymentPending;
+  String get _paymentStateMessage => _paymentCompleted
+      ? '${DriverRidePaymentState(_ride).paidMessage}. لا يمكن تحصيله مرة أخرى.'
+      : 'توجد عملية دفع بالمحفظة قيد التنفيذ أو التحقق. انتظر تأكيد نتيجتها قبل التحصيل.';
 
   Future<bool> _refreshFare() async {
     if (_refreshingFare || !mounted) return false;
@@ -143,6 +150,11 @@ class _DriverPaymentViewState extends State<DriverPaymentView>
     try {
       final unchanged = await _refreshFare();
       if (!mounted || _fareError != null) return;
+      if (_collectionBlocked) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(_paymentStateMessage)));
+        return;
+      }
       if (_waitingIsOpen) {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
             content: Text('استأنف الرحلة وأوقف الانتظار قبل التحصيل.')));
@@ -267,123 +279,147 @@ class _DriverPaymentViewState extends State<DriverPaymentView>
 
   @override
   Widget build(BuildContext context) => Scaffold(
-        appBar: AppBar(title: const Text('تحصيل الدفع النقدي')),
+        appBar: AppBar(
+            title:
+                Text(_paymentCompleted ? 'حالة الدفع' : 'تحصيل الدفع النقدي')),
         body: Center(
             child: ConstrainedBox(
                 constraints: const BoxConstraints(maxWidth: 720),
                 child: ListView(
                   padding: const EdgeInsets.all(20),
                   children: [
-                    DriverHero(
-                      eyebrow: 'تحصيل رحلة #${_ride['id']}',
-                      title: '${_totalDue.toStringAsFixed(0)} ر.ي',
-                      subtitle: 'إجمالي المبلغ المطلوب من العميل',
-                      trailing:
-                          const Icon(Icons.payments_outlined, color: copper),
-                    ),
-                    const SizedBox(height: 24),
-                    Text('تفاصيل التحصيل',
-                        style: Theme.of(context).textTheme.titleLarge),
-                    const SizedBox(height: 16),
-                    if (_ride['destinationDisplayName'] != null ||
-                        _ride['destinationAddress'] != null)
-                      Text(
-                          'الوجهة الحالية: ${_ride['destinationDisplayName'] ?? _ride['destinationAddress']}'),
-                    Text('أجرة الرحلة: ${_fare.toStringAsFixed(0)} ر.ي'),
-                    if (_routeChangeFees > 0)
-                      Text(
-                          'منها رسوم تغيير الوجهة: ${_routeChangeFees.toStringAsFixed(0)} ر.ي'),
-                    Text(
-                        'رسوم الانتظار: ${_waitingFee.toStringAsFixed(0)} ر.ي'),
-                    Text(
-                        'رسم الخدمة من العميل: ${_serviceFee.toStringAsFixed(0)} ر.ي'),
-                    Text(
-                        'إجمالي المطلوب تحصيله: ${_totalDue.toStringAsFixed(0)} ر.ي',
-                        style: const TextStyle(fontWeight: FontWeight.bold)),
-                    const Divider(height: 28),
-                    Text(
-                        'عمولتك للمنصة: ${_commission.toStringAsFixed(0)} ر.ي'),
-                    Text(
-                        'رسم الخدمة المستحق للمنصة: ${_serviceFee.toStringAsFixed(0)} ر.ي'),
-                    Text(
-                        'التزامك للمنصة: ${_platformReceivable.toStringAsFixed(0)} ر.ي'),
-                    if (_customerWalletExcess > 0)
-                      Text(
-                        'الزيادة لمحفظة العميل: ${_customerWalletExcess.toStringAsFixed(0)} ر.ي',
-                        style: const TextStyle(color: Colors.deepOrange),
+                    if (_paymentCompleted) ...[
+                      DriverHero(
+                        eyebrow: 'رحلة #${_ride['id']}',
+                        title: DriverRidePaymentState(_ride).paidMessage,
+                        subtitle:
+                            'المبلغ المدفوع: ${_totalDue.toStringAsFixed(0)} ر.ي',
+                        trailing: const Icon(Icons.check_circle_outline,
+                            color: copper),
                       ),
-                    Text(
-                      'إجمالي مديونيتك بعد التحصيل: ${_expectedDriverDebt.toStringAsFixed(0)} ر.ي',
-                      style: const TextStyle(fontWeight: FontWeight.bold),
-                    ),
-                    Text(
-                        'صافي مستحقك من الأجرة: ${_driverNet.toStringAsFixed(0)} ر.ي',
-                        style: const TextStyle(fontWeight: FontWeight.bold)),
-                    const SizedBox(height: 20),
-                    TextField(
-                      controller: _cash,
-                      enabled: !_saving,
-                      keyboardType:
-                          const TextInputType.numberWithOptions(decimal: true),
-                      decoration: const InputDecoration(
-                        labelText: 'المبلغ المقبوض من العميل',
-                        suffixText: 'ر.ي',
-                        border: OutlineInputBorder(),
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-                    if (_refreshingFare) const LinearProgressIndicator(),
-                    if (_waitingIsOpen)
+                      const SizedBox(height: 20),
                       const Text(
-                          'يوجد طلب انتظار أو توقف مفتوح. استأنف الرحلة أو اسحب الطلب من شاشة الرحلة قبل التحصيل.'),
-                    if (_fareError != null) Text(_fareError!),
-                    TextButton.icon(
-                      onPressed:
-                          _saving || _refreshingFare ? null : _refreshFare,
-                      icon: const Icon(Icons.refresh),
-                      label: const Text('تحديث الأجرة وحالة الانتظار'),
-                    ),
-                    if (_approvalMessage != null) ...[
-                      Container(
-                        padding: const EdgeInsets.all(12),
-                        decoration: BoxDecoration(
-                          color: _approvalStatus == 1
-                              ? Colors.green.withValues(alpha: .10)
-                              : _approvalStatus == 0
-                                  ? Colors.amber.withValues(alpha: .14)
-                                  : Colors.red.withValues(alpha: .10),
-                          borderRadius: BorderRadius.circular(10),
+                          'اكتمل الدفع. يمكنك إنهاء الرحلة عند اكتمالها.'),
+                      const SizedBox(height: 16),
+                      OutlinedButton(
+                        onPressed: () => Navigator.of(context).maybePop(),
+                        child: const Text('العودة إلى الرحلة'),
+                      ),
+                    ] else ...[
+                      DriverHero(
+                        eyebrow: 'تحصيل رحلة #${_ride['id']}',
+                        title: '${_totalDue.toStringAsFixed(0)} ر.ي',
+                        subtitle: 'إجمالي المبلغ المطلوب من العميل',
+                        trailing:
+                            const Icon(Icons.payments_outlined, color: copper),
+                      ),
+                      const SizedBox(height: 24),
+                      Text('تفاصيل التحصيل',
+                          style: Theme.of(context).textTheme.titleLarge),
+                      const SizedBox(height: 16),
+                      if (_ride['destinationDisplayName'] != null ||
+                          _ride['destinationAddress'] != null)
+                        Text(
+                            'الوجهة الحالية: ${_ride['destinationDisplayName'] ?? _ride['destinationAddress']}'),
+                      Text('أجرة الرحلة: ${_fare.toStringAsFixed(0)} ر.ي'),
+                      if (_routeChangeFees > 0)
+                        Text(
+                            'منها رسوم تغيير الوجهة: ${_routeChangeFees.toStringAsFixed(0)} ر.ي'),
+                      Text(
+                          'رسوم الانتظار: ${_waitingFee.toStringAsFixed(0)} ر.ي'),
+                      Text(
+                          'رسم الخدمة من العميل: ${_serviceFee.toStringAsFixed(0)} ر.ي'),
+                      Text(
+                          'إجمالي المطلوب تحصيله: ${_totalDue.toStringAsFixed(0)} ر.ي',
+                          style: const TextStyle(fontWeight: FontWeight.bold)),
+                      const Divider(height: 28),
+                      Text(
+                          'عمولتك للمنصة: ${_commission.toStringAsFixed(0)} ر.ي'),
+                      Text(
+                          'رسم الخدمة المستحق للمنصة: ${_serviceFee.toStringAsFixed(0)} ر.ي'),
+                      Text(
+                          'التزامك للمنصة: ${_platformReceivable.toStringAsFixed(0)} ر.ي'),
+                      if (_customerWalletExcess > 0)
+                        Text(
+                          'الزيادة لمحفظة العميل: ${_customerWalletExcess.toStringAsFixed(0)} ر.ي',
+                          style: const TextStyle(color: Colors.deepOrange),
                         ),
-                        child: Text(
-                          _approvalMessage!,
-                          textAlign: TextAlign.center,
+                      Text(
+                        'إجمالي مديونيتك بعد التحصيل: ${_expectedDriverDebt.toStringAsFixed(0)} ر.ي',
+                        style: const TextStyle(fontWeight: FontWeight.bold),
+                      ),
+                      Text(
+                          'صافي مستحقك من الأجرة: ${_driverNet.toStringAsFixed(0)} ر.ي',
+                          style: const TextStyle(fontWeight: FontWeight.bold)),
+                      const SizedBox(height: 20),
+                      TextField(
+                        controller: _cash,
+                        enabled: !_saving && !_collectionBlocked,
+                        keyboardType: const TextInputType.numberWithOptions(
+                            decimal: true),
+                        decoration: const InputDecoration(
+                          labelText: 'المبلغ المقبوض من العميل',
+                          suffixText: 'ر.ي',
+                          border: OutlineInputBorder(),
                         ),
                       ),
                       const SizedBox(height: 16),
+                      if (_refreshingFare) const LinearProgressIndicator(),
+                      if (_collectionBlocked) Text(_paymentStateMessage),
+                      if (_waitingIsOpen)
+                        const Text(
+                            'يوجد طلب انتظار أو توقف مفتوح. استأنف الرحلة أو اسحب الطلب من شاشة الرحلة قبل التحصيل.'),
+                      if (_fareError != null) Text(_fareError!),
+                      TextButton.icon(
+                        onPressed:
+                            _saving || _refreshingFare ? null : _refreshFare,
+                        icon: const Icon(Icons.refresh),
+                        label: const Text('تحديث الأجرة وحالة الانتظار'),
+                      ),
+                      if (_approvalMessage != null) ...[
+                        Container(
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: _approvalStatus == 1
+                                ? Colors.green.withValues(alpha: .10)
+                                : _approvalStatus == 0
+                                    ? Colors.amber.withValues(alpha: .14)
+                                    : Colors.red.withValues(alpha: .10),
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: Text(
+                            _approvalMessage!,
+                            textAlign: TextAlign.center,
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                      ],
+                      FilledButton.icon(
+                        onPressed: _saving ||
+                                _refreshingFare ||
+                                _fareError != null ||
+                                _waitingIsOpen ||
+                                _collectionBlocked ||
+                                _approvalStatus == 0
+                            ? null
+                            : _submit,
+                        icon: _saving
+                            ? const SizedBox(
+                                width: 18,
+                                height: 18,
+                                child:
+                                    CircularProgressIndicator(strokeWidth: 2))
+                            : const Icon(Icons.payments_outlined),
+                        label: Text(_approvalStatus == 1
+                            ? 'إعادة تسجيل التحصيل بعد الموافقة'
+                            : 'تسجيل التحصيل فقط'),
+                      ),
+                      const SizedBox(height: 12),
+                      const Text(
+                        'إذا كان المبلغ أكبر من الإجمالي، يضاف الفرق إلى محفظة العميل وتصبح قيمته التزاماً عليك. وإذا كان أقل، يُرسل طلب موافقة للعميل لتغطية الفرق من محفظته. لا يُخصم شيء ولا تُسجل الدفعة حتى يوافق العميل، ثم أعد تسجيل المبلغ نفسه. إذا لم يكف الرصيد أو رُفض الطلب فلن يكتمل التحصيل.',
+                        textAlign: TextAlign.start,
+                      ),
                     ],
-                    FilledButton.icon(
-                      onPressed: _saving ||
-                              _refreshingFare ||
-                              _fareError != null ||
-                              _waitingIsOpen ||
-                              _approvalStatus == 0
-                          ? null
-                          : _submit,
-                      icon: _saving
-                          ? const SizedBox(
-                              width: 18,
-                              height: 18,
-                              child: CircularProgressIndicator(strokeWidth: 2))
-                          : const Icon(Icons.payments_outlined),
-                      label: Text(_approvalStatus == 1
-                          ? 'إعادة تسجيل التحصيل بعد الموافقة'
-                          : 'تسجيل التحصيل فقط'),
-                    ),
-                    const SizedBox(height: 12),
-                    const Text(
-                      'إذا كان المبلغ أكبر من الإجمالي، يضاف الفرق إلى محفظة العميل وتصبح قيمته التزاماً عليك. وإذا كان أقل، يُرسل طلب موافقة للعميل لتغطية الفرق من محفظته. لا يُخصم شيء ولا تُسجل الدفعة حتى يوافق العميل، ثم أعد تسجيل المبلغ نفسه. إذا لم يكف الرصيد أو رُفض الطلب فلن يكتمل التحصيل.',
-                      textAlign: TextAlign.start,
-                    ),
                   ],
                 ))),
       );
