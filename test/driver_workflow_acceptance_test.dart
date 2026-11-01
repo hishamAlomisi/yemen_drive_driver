@@ -18,6 +18,7 @@ class _Repository implements DriverRepository {
   final checks = <Completer<bool>>[];
   bool canDecide = true;
   int decisions = 0;
+  Map<String, Object?>? refundQuote;
   @override
   Future<bool> isRequestAvailable(int rideId) {
     final check = Completer<bool>();
@@ -31,8 +32,12 @@ class _Repository implements DriverRepository {
   @override
   Future<List<Map<String, Object?>>> notifications() async => [];
   @override
-  Future<Map<String, Object?>> getCancellationRequest(int requestId) async =>
-      {'id': requestId, 'canDecide': canDecide, 'reason': 'تغيرت الخطة'};
+  Future<Map<String, Object?>> getCancellationRequest(int requestId) async => {
+        'id': requestId,
+        'canDecide': canDecide,
+        'reason': 'تغيرت الخطة',
+        'refundQuote': refundQuote
+      };
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
@@ -169,6 +174,37 @@ void main() {
     expect(find.text('موافقة'), findsNothing);
     expect(find.text('لا يوجد قرار مطلوب لهذا الطلب.'), findsOneWidget);
     expect(subject.notifications.single['isRead'], false);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets(
+      'read paid cancellation remains actionable and shows refund breakdown',
+      (tester) async {
+    final repository = _Repository()
+      ..refundQuote = {
+        'paymentCompleted': true,
+        'paidAmount': 1000,
+        'totalDeductions': 150,
+        'refundAmount': 850,
+      };
+    final subject = Get.put<DriverController>(controller(repository));
+    subject.notifications.add({
+      'id': 15,
+      'title': 'طلب إلغاء رحلة مدفوعة',
+      'body': 'راجع الاسترداد',
+      'isRead': true,
+      'dataJson': '{"rideId":7,"cancellationRequestId":21}',
+    });
+    await tester
+        .pumpWidget(const GetMaterialApp(home: DriverNotificationsView()));
+    await tester.pumpAndSettle();
+    expect(find.text('المبلغ المدفوع: 1000 ريال يمني'), findsOneWidget);
+    expect(find.text('المبلغ المسترد: 850'), findsOneWidget);
+    expect(find.text('موافقة'), findsOneWidget);
+    await tester.tap(find.text('موافقة'));
+    await tester.pumpAndSettle();
+    expect(repository.decisions, 1);
+    expect(find.text('موافقة'), findsNothing);
     await tester.pumpWidget(const SizedBox());
   });
 

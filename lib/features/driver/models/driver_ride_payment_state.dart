@@ -6,6 +6,20 @@ class DriverRidePaymentState {
   final Map<String, Object?> ride;
 
   bool get completed => ride['paymentCompleted'] == true;
+  bool get cashSelected =>
+      ride['paymentMethodCode']?.toString().toLowerCase() == 'cash';
+  String get selectedMethodName =>
+      ride['selectedPaymentMethodNameAr']?.toString().trim() ??
+      switch (ride['paymentMethodCode']?.toString().toLowerCase()) {
+        'cash' => 'نقداً',
+        'wallet' => 'محفظة يمن درايف',
+        'floosak' => 'فلوسك',
+        'jaib' => 'جيب',
+        _ => 'محفظة خارجية',
+      };
+  String get collectionMessage => completed
+      ? paidMessage
+      : 'طريقة الراكب: $selectedMethodName. ${pending ? 'الدفع قيد التنفيذ أو التحقق.' : 'لم يتم الدفع بعد.'}';
   bool get pending => !completed && ride['walletPaymentPending'] == true;
   bool get requiredBeforeStart =>
       !completed && ride['paymentRequiredBeforeStart'] == true;
@@ -29,5 +43,7 @@ class DriverRidePaymentState {
           ? 'دفع الراكب قيد التنفيذ أو التحقق؛ انتظر تأكيد النتيجة قبل بدء الرحلة أو التحصيل.'
           : requiredBeforeStart
               ? 'بانتظار دفع الراكب أو اختياره الدفع النقدي قبل بدء الرحلة.'
-              : null;
+              : !cashSelected
+                  ? collectionMessage
+                  : null;
 }

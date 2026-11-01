@@ -5,6 +5,7 @@ import '../controllers/driver_controller.dart';
 import '../models/driver_ride_payment_state.dart';
 import '../views/driver_chat_view.dart';
 import 'driver_design.dart';
+import 'driver_arrival_panel.dart';
 import '../../../shared/widgets/ride_waiting_panel.dart';
 import '../../../shared/widgets/ride_route_change_panel.dart';
 
@@ -215,6 +216,7 @@ class DriverRideCard extends GetView<DriverController> {
                 icon: const Icon(Icons.place_outlined),
                 label: const Text('تأكيد الوصول إلى الراكب'),
               ),
+            if (assigned && state == 9) DriverArrivalPanel(rideId: int.parse('${ride['id']}')),
             if (assigned && state == 9)
               FilledButton.icon(
                 onPressed: payment.startBlocked
@@ -243,7 +245,9 @@ class DriverRideCard extends GetView<DriverController> {
                 const SizedBox(height: 8),
               ],
               FilledButton.icon(
-                onPressed: () => controller.updateStatus(ride, 6, 'مكتملة'),
+                onPressed: payment.completed
+                    ? () => controller.updateStatus(ride, 6, 'مكتملة')
+                    : null,
                 icon: const Icon(Icons.flag_rounded),
                 label: const Text('إنهاء الرحلة'),
               ),

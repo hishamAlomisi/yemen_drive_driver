@@ -364,14 +364,16 @@ class DriverController extends GetxController {
   }
 
   /// A delayed Hub event must pass the same check as a push notification.
-  Future<void> receiveAvailableRequest(Map<String, Object?> payload, int rideId) async {
+  Future<void> receiveAvailableRequest(
+      Map<String, Object?> payload, int rideId) async {
     final snapshotVersion = _requestSnapshotVersion;
     final version = (_requestVersions[rideId] ?? 0) + 1;
     _requestVersions[rideId] = version;
     try {
       if (!await _repository.isRequestAvailable(rideId) ||
           _requestVersions[rideId] != version ||
-          _requestSnapshotVersion != snapshotVersion || isClosed) return;
+          _requestSnapshotVersion != snapshotVersion ||
+          isClosed) return;
       _upsertRide(payload, rideId);
       await _refreshNotifications(announceRequests: true);
     } on Object {
@@ -389,24 +391,34 @@ class DriverController extends GetxController {
         Text('${ride['status']}' == '5'
             ? 'يُرسل الطلب إلى الراكب، وتستمر الرحلة حتى موافقته.'
             : 'سيتم إلغاء الرحلة قبل بدءها.'),
-        TextField(controller: reason, maxLength: 1000,
+        TextField(
+            controller: reason,
+            maxLength: 1000,
             decoration: const InputDecoration(labelText: 'سبب الإلغاء')),
       ]),
       actions: [
-        TextButton(onPressed: () => Get.back<String>(), child: const Text('رجوع')),
-        FilledButton(onPressed: () {
-          if (reason.text.trim().length >= 3) Get.back(result: reason.text.trim());
-        }, child: const Text('إرسال')),
+        TextButton(
+            onPressed: () => Get.back<String>(), child: const Text('رجوع')),
+        FilledButton(
+            onPressed: () {
+              if (reason.text.trim().length >= 3)
+                Get.back(result: reason.text.trim());
+            },
+            child: const Text('إرسال')),
       ],
     ));
-    unawaited(Future<void>.delayed(const Duration(milliseconds: 400), reason.dispose));
+    unawaited(Future<void>.delayed(
+        const Duration(milliseconds: 400), reason.dispose));
     // Dialog reverse animations may still be reading the editing value.
     if (submitted == null) return;
     cancellationRequestsInFlight.add(id);
     try {
       final result = await _repository.requestRideCancellation(id, submitted);
-      Get.snackbar('تم تسجيل الطلب', '${result['rideStatus']}' == '7'
-          ? 'أُلغيت الرحلة وأصبحت متاحاً.' : 'بانتظار موافقة الراكب. تستمر الرحلة حالياً.');
+      Get.snackbar(
+          'تم تسجيل الطلب',
+          '${result['rideStatus']}' == '7'
+              ? 'أُلغيت الرحلة وأصبحت متاحاً.'
+              : 'بانتظار موافقة الراكب. تستمر الرحلة حالياً.');
       await load(showLoading: false);
     } on Object {
       Get.snackbar('تعذر إلغاء الرحلة', 'تحقق من حالة الرحلة ثم أعد المحاولة.');
@@ -588,6 +600,11 @@ class DriverController extends GetxController {
       Get.snackbar('بانتظار الدفع', payment.message!);
       return;
     }
+    if (status == 6 && !payment.completed) {
+      Get.snackbar('بانتظار الدفع',
+          '${payment.collectionMessage} لا يمكن إنهاء الرحلة قبل السداد.');
+      return;
+    }
     try {
       await _repository.updateRideStatus(rideId: id, status: status);
       Get.snackbar('تم التحديث', 'أصبحت الحالة: $label');
@@ -650,7 +667,8 @@ class DriverController extends GetxController {
       notifications.assignAll(await _repository.notifications());
       if (announceRequests && Get.isRegistered<PushNotificationsService>()) {
         for (final item in notifications) {
-          await Get.find<PushNotificationsService>().showRideRequestNotification(item);
+          await Get.find<PushNotificationsService>()
+              .showRideRequestNotification(item);
         }
       }
     } catch (_) {
@@ -665,6 +683,15 @@ class DriverController extends GetxController {
     try {
       latest = await _repository.getRideForPayment(id);
       _upsertRide(latest, id);
+      final paymentState = DriverRidePaymentState(latest);
+      if (!paymentState.cashSelected && !paymentState.completed) {
+        await Get.to<void>(() => DriverPaymentView(
+            ride: latest,
+            repository: _repository,
+            hub: Get.find<TrackingHubService>()));
+        await load(showLoading: false);
+        return;
+      }
       if (latest['paymentCompleted'] == true ||
           latest['walletPaymentPending'] == true) {
         Get.snackbar(
@@ -1114,6 +1141,11 @@ class DriverController extends GetxController {
     } catch (_) {
       Get.snackbar('تعذر تسجيل القرار', 'تحقق من حالة الطلب ثم حاول مرة أخرى.');
     }
+  }
+
+  Future<void> chooseCancellationRefund(int requestId, int method, int revision) async {
+    await _repository.chooseCancellationRefund(requestId, method, revision);
+    await load(showLoading: false);
   }
 
   void showNotifications() {

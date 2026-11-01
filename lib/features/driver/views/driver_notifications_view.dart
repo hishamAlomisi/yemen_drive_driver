@@ -41,6 +41,7 @@ class _NotificationCard extends StatefulWidget {
 class _NotificationCardState extends State<_NotificationCard> {
   DriverController get controller => Get.find<DriverController>();
   Future<Map<String, Object?>>? _cancellation;
+  int _refundMethod = 2;
   bool _busy = false;
   bool _showRoute = false;
   bool _showWaiting = false;
@@ -122,12 +123,40 @@ class _NotificationCardState extends State<_NotificationCard> {
                           child: const Text('إعادة تحميل حالة الطلب'));
                     final request = snapshot.data;
                     if (request == null) return const LinearProgressIndicator();
-                    if (request['canDecide'] != true || item['isRead'] == true)
-                      return const Text('لا يوجد قرار مطلوب لهذا الطلب.');
+                    if (request['canChooseRefundMethod'] == true) {
+                      final quote = request['refundQuote'] as Map? ?? {};
+                      return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                        const Text('اكتملت الموافقات؛ اختر طريقة إعادة المبلغ'),
+                        Text('المبلغ المدفوع: ${quote['paidAmount']} ريال يمني'),
+                        Text('الجزء المقطوع: ${quote['travelledFare']} · رسوم الرحلة: ${quote['serviceFee']} · رسوم الإلغاء: ${quote['cancellationFee']}'),
+                        Text('إجمالي الخصم: ${quote['totalDeductions']} · صافي الاسترداد: ${quote['refundAmount']} ريال يمني'),
+                        RadioListTile<int>(value: 2, groupValue: _refundMethod, onChanged: _busy ? null : (value) => setState(() => _refundMethod = value!), title: const Text('إرجاع إلى محفظة الراكب')),
+                        RadioListTile<int>(value: 1, groupValue: _refundMethod, onChanged: _busy ? null : (value) => setState(() => _refundMethod = value!), title: const Text('إرجاع نقداً إلى الراكب')),
+                        FilledButton(key: const ValueKey('confirm-cancellation-refund-method'), onPressed: _busy ? null : () => _decide(() => controller.chooseCancellationRefund(
+                            cancellationId!, _refundMethod, (request['refundChoiceRevision'] as num).toInt())),
+                            child: Text(_refundMethod == 2 ? 'طلب موافقة الراكب على المحفظة' : 'أؤكد أنني أعدت صافي المبلغ نقداً')),
+                      ]);
+                    }
+                    if (request['canDecide'] != true)
+                      return Text(request['refundConsentPending'] == true ? 'بانتظار موافقة الراكب على الاسترداد إلى المحفظة.' : 'لا يوجد قرار مطلوب لهذا الطلب.');
                     return Column(
                         crossAxisAlignment: CrossAxisAlignment.stretch,
                         children: [
                           Text('السبب: ${request['reason'] ?? ''}'),
+                          if (request['refundQuote'] is Map &&
+                              (request['refundQuote']
+                                      as Map)['paymentCompleted'] ==
+                                  true) ...[
+                            const SizedBox(height: 8),
+                            Text(
+                                'المبلغ المدفوع: ${(request['refundQuote'] as Map)['paidAmount']} ريال يمني'),
+                            Text(
+                                'إجمالي الخصم: ${(request['refundQuote'] as Map)['totalDeductions'] ?? 'تقدّره الإدارة'}'),
+                            Text(
+                                'المبلغ المسترد: ${(request['refundQuote'] as Map)['refundAmount'] ?? 'تقدّره الإدارة'}'),
+                            const Text(
+                                'بعد موافقتك، تراجع الإدارة الاسترداد إلى محفظة الراكب.'),
+                          ],
                           Wrap(spacing: 8, children: [
                             FilledButton(
                                 onPressed: _busy

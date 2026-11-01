@@ -37,11 +37,17 @@ abstract interface class DriverRepository {
   Future<Map<String, Object?>> requestRideCancellation(
       int rideId, String reason);
   Future<Map<String, Object?>> getCancellationRequest(int requestId);
+  Future<void> chooseCancellationRefund(int requestId, int method, int revision);
 }
 
 class ApiDriverRepository implements DriverRepository {
   const ApiDriverRepository(this._provider);
   final DriverProvider _provider;
+  @override
+  Future<void> chooseCancellationRefund(int requestId, int method, int revision) =>
+      _provider.execute('RideCancellationRequestModel', 'update', {
+        'id': requestId, 'requestedRefundMethod': method, 'refundChoiceRevision': revision, 'cashReturned': method == 1,
+      });
 
   @override
   Future<bool> isRequestAvailable(int rideId) async =>
@@ -121,6 +127,7 @@ class ApiDriverRepository implements DriverRepository {
           detail['paymentCompleted'] == true || paidPayment != null,
       'walletPaymentPending': detail['walletPaymentPending'] == true,
       'paymentMethodNameAr': detail['paymentMethodNameAr'],
+      'selectedPaymentMethodNameAr': detail['selectedPaymentMethodNameAr'],
       'paymentProvider': detail['paymentProvider'] ?? paidPayment?['provider'],
       if (detail.containsKey('paymentRequiredBeforeStart'))
         'paymentRequiredBeforeStart':

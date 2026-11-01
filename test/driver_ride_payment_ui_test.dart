@@ -129,6 +129,23 @@ Future<void> _mount(WidgetTester tester, Map<String, Object?> ride) async {
 
 void main() {
   tearDown(() => Get.reset());
+  testWidgets('finish stays disabled until server confirms payment',
+      (tester) async {
+    await _mount(
+        tester, {..._ride, 'status': 5, 'paymentMethodCode': 'wallet'});
+    expect(_button(tester, 'إنهاء الرحلة').onPressed, isNull);
+    expect(find.textContaining('محفظة يمن درايف'), findsOneWidget);
+    await _mount(tester, {
+      ..._ride,
+      'status': 5,
+      'paymentMethodCode': 'wallet',
+      'paymentCompleted': true,
+      'paymentProvider': 'YemenDriveWallet'
+    });
+    expect(_button(tester, 'إنهاء الرحلة').onPressed, isNotNull);
+    expect(find.text('تحصيل الدفع'), findsNothing);
+    await tester.pumpWidget(const SizedBox());
+  });
 
   for (final status in [3, 4, 9, 5]) {
     testWidgets(

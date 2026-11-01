@@ -28,6 +28,7 @@ class _DriverPaymentViewState extends State<DriverPaymentView>
   late final TextEditingController _cash;
   late Map<String, Object?> _ride;
   bool _refreshingFare = false;
+  bool _fareRefreshRequested = false;
   String? _fareError;
   bool _saving = false;
   int? _approvalId;
@@ -84,38 +85,55 @@ class _DriverPaymentViewState extends State<DriverPaymentView>
   bool get _waitingIsOpen => _ride['waitingIsOpen'] == true;
   bool get _paymentCompleted => _ride['paymentCompleted'] == true;
   bool get _walletPaymentPending => _ride['walletPaymentPending'] == true;
-  bool get _collectionBlocked => _paymentCompleted || _walletPaymentPending;
+  bool get _cashSelected => DriverRidePaymentState(_ride).cashSelected;
+  bool get _collectionBlocked =>
+      _paymentCompleted || _walletPaymentPending || !_cashSelected;
   String get _paymentStateMessage => _paymentCompleted
       ? '${DriverRidePaymentState(_ride).paidMessage}. لا يمكن تحصيله مرة أخرى.'
-      : 'توجد عملية دفع بالمحفظة قيد التنفيذ أو التحقق. انتظر تأكيد نتيجتها قبل التحصيل.';
+      : DriverRidePaymentState(_ride).collectionMessage;
 
   Future<bool> _refreshFare() async {
-    if (_refreshingFare || !mounted) return false;
+    if (!mounted) return false;
+    if (_refreshingFare) {
+      _fareRefreshRequested = true;
+      return false;
+    }
     final rideId = int.tryParse('${_ride['id']}');
     if (rideId == null) return false;
     setState(() => _refreshingFare = true);
+    var unchanged = true;
     try {
-      final latest = await widget.repository.getRideForPayment(rideId);
-      if (!mounted) return false;
-      final previousTotal = _totalDue;
-      final previousWaiting = _waitingFee;
-      final previousRouteVersion = _ride['routeVersion'];
-      final usedSuggestedAmount =
-          _cash.text == previousTotal.toStringAsFixed(0);
-      setState(() {
-        _ride = latest;
-        _fareError = null;
-        if (usedSuggestedAmount) _cash.text = _totalDue.toStringAsFixed(0);
-      });
-      return previousTotal == _totalDue &&
-          previousWaiting == _waitingFee &&
-          previousRouteVersion == _ride['routeVersion'];
-    } catch (_) {
-      if (mounted) {
-        setState(() =>
-            _fareError = 'تعذر تأكيد الأجرة. أعد التحديث قبل تسجيل التحصيل.');
-      }
-      return false;
+      // An electronic payment can settle while an older fare response is in
+      // flight. Reconcile every queued event before allowing cash collection.
+      do {
+        _fareRefreshRequested = false;
+        try {
+          final latest = await widget.repository.getRideForPayment(rideId);
+          if (!mounted) return false;
+          final previousTotal = _totalDue;
+          final previousWaiting = _waitingFee;
+          final previousRouteVersion = _ride['routeVersion'];
+          final usedSuggestedAmount =
+              _cash.text == previousTotal.toStringAsFixed(0);
+          setState(() {
+            _ride = latest;
+            _fareError = null;
+            if (usedSuggestedAmount) _cash.text = _totalDue.toStringAsFixed(0);
+          });
+          unchanged = unchanged &&
+              previousTotal == _totalDue &&
+              previousWaiting == _waitingFee &&
+              previousRouteVersion == _ride['routeVersion'];
+        } catch (_) {
+          unchanged = false;
+          if (mounted) {
+            setState(() {
+              _fareError = 'تعذر تأكيد الأجرة. أعد التحديث قبل تسجيل التحصيل.';
+            });
+          }
+        }
+      } while (_fareRefreshRequested && mounted);
+      return unchanged;
     } finally {
       if (mounted) setState(() => _refreshingFare = false);
     }
@@ -280,8 +298,9 @@ class _DriverPaymentViewState extends State<DriverPaymentView>
   @override
   Widget build(BuildContext context) => Scaffold(
         appBar: AppBar(
-            title:
-                Text(_paymentCompleted ? 'حالة الدفع' : 'تحصيل الدفع النقدي')),
+            title: Text(_paymentCompleted || !_cashSelected
+                ? 'حالة الدفع'
+                : 'تحصيل الدفع النقدي')),
         body: Center(
             child: ConstrainedBox(
                 constraints: const BoxConstraints(maxWidth: 720),
@@ -305,6 +324,27 @@ class _DriverPaymentViewState extends State<DriverPaymentView>
                         onPressed: () => Navigator.of(context).maybePop(),
                         child: const Text('العودة إلى الرحلة'),
                       ),
+                    ] else if (!_cashSelected) ...[
+                      DriverHero(
+                        eyebrow: 'طريقة الدفع التي اختارها الراكب',
+                        title: DriverRidePaymentState(_ride).selectedMethodName,
+                        subtitle: _paymentStateMessage,
+                        trailing: const Icon(
+                            Icons.account_balance_wallet_outlined,
+                            color: copper),
+                      ),
+                      const SizedBox(height: 20),
+                      const Text(
+                          'يُكمل الراكب الدفع من تطبيقه. إذا أراد الدفع نقداً فعليه تغيير الطريقة إلى النقد أولاً. لا يمكن إنهاء الرحلة قبل تأكيد السداد.'),
+                      const SizedBox(height: 16),
+                      OutlinedButton.icon(
+                        onPressed: _refreshingFare ? null : _refreshFare,
+                        icon: const Icon(Icons.refresh),
+                        label: const Text('تحديث حالة الدفع'),
+                      ),
+                      TextButton(
+                          onPressed: () => Navigator.of(context).maybePop(),
+                          child: const Text('العودة إلى الرحلة')),
                     ] else ...[
                       DriverHero(
                         eyebrow: 'تحصيل رحلة #${_ride['id']}',
