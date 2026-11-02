@@ -9,6 +9,7 @@ import '../lib/features/driver/repositories/driver_repository.dart';
 class PaymentApi extends ApiClient {
   PaymentApi() : super(SecureStorageService());
   bool walletPaymentPending = false;
+  bool paymentCompleted = false;
   List<Object?> payments = [];
   String? paymentMethodNameAr;
   String? paymentProvider;
@@ -40,6 +41,7 @@ class PaymentApi extends ApiClient {
               'paymentRequiredBeforeStart': paymentRequiredBeforeStart,
             },
             'payments': payments,
+            'paymentCompleted': paymentCompleted,
             'walletPaymentPending': walletPaymentPending,
             'paymentMethodNameAr': paymentMethodNameAr,
             'paymentProvider': paymentProvider,
@@ -59,6 +61,7 @@ void main() {
     expect(pending['paymentCompleted'], isFalse);
     expect((await repository.getRide(7))['walletPaymentPending'], isTrue);
     api.walletPaymentPending = false;
+    api.paymentCompleted = true;
     api.payments = [
       {'provider': 'Floosak', 'status': 2}
     ];
@@ -91,6 +94,7 @@ void main() {
     expect(required['paymentMethodNameAr'], isNull);
     api
       ..paymentRequiredBeforeStart = false
+      ..paymentCompleted = true
       ..payments = [
         {'provider': 'Jaib', 'status': 'Paid'}
       ]

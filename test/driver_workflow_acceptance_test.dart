@@ -131,18 +131,18 @@ void main() {
           home: Scaffold(
               body: SingleChildScrollView(
                   child: DriverRideCard(
-            ride: {...request, 'driverId': 42, 'status': status},
+            ride: {...request, 'driverId': 42, 'status': status, if (status == 9) 'passengerBoardedAtUtc': '2026-11-01T10:00:00Z'},
           ))),
         ));
     await mount(4);
     await tester.pumpAndSettle();
     expect(find.text('بدء الرحلة'), findsNothing);
     expect(find.text('إلغاء الرحلة'), findsOneWidget);
-    await tester.tap(find.text('تأكيد الوصول إلى الراكب'));
+    await tester.tap(find.text('تأكيد الوصول'));
     expect(subject.nextStatus, 9);
     await mount(9);
     await tester.pumpAndSettle();
-    expect(find.text('تأكيد الوصول إلى الراكب'), findsNothing);
+    expect(find.text('تأكيد الوصول'), findsNothing);
     expect(find.text('بدء الرحلة'), findsOneWidget);
     await tester.tap(find.text('بدء الرحلة'));
     expect(subject.nextStatus, 5);

@@ -7,6 +7,7 @@ import '../../../core/network/api_client.dart';
 import '../../../core/network/api_models.dart';
 import '../../../core/realtime/tracking_hub_service.dart';
 import '../../../core/services/auth_session_service.dart';
+import '../../../shared/widgets/chat_quick_replies.dart';
 
 class DriverChatView extends StatefulWidget {
   const DriverChatView({required this.rideId, super.key});
@@ -305,6 +306,15 @@ class _DriverChatViewState extends State<DriverChatView> {
                             ),
                     ),
             ),
+            Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 10),
+                child: ChatQuickReplies(controller: _input, suggestions: const [
+                  'أنا في الطريق إليك',
+                  'وصلت إلى نقطة الانطلاق',
+                  'أين موقعك بالتحديد؟',
+                  'سأصل خلال دقائق',
+                  'يرجى الاستعداد للصعود',
+                ])),
             SafeArea(
               child: Padding(
                 padding: const EdgeInsets.all(10),

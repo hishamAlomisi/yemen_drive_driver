@@ -15,6 +15,7 @@ Map<String, Object?> ride({int waitingFee = 0, bool open = false}) => {
       'serviceFee': 100,
       'waitingFee': waitingFee,
       'totalAmount': 1100 + waitingFee,
+      'finance': {'amountDue': 1100 + waitingFee, 'paidAmount': 0, 'refundedAmount': 0, 'outstandingAmount': 1100 + waitingFee},
       'driverCommissionAmount': 100,
       'platformShare': 200,
       'driverShare': 900 + waitingFee,
@@ -68,6 +69,11 @@ Future<void> mount(WidgetTester tester, PaymentRepository repository) async {
 }
 
 Future<void> collect(WidgetTester tester) async {
+  if (find.text('تغيرت حالة الدفع أو الأجرة. راجع الفاتورة الحالية قبل التحصيل.').evaluate().isNotEmpty) {
+    await tester.ensureVisible(find.text('تحديث الأجرة وحالة الانتظار'));
+    await tester.tap(find.text('تحديث الأجرة وحالة الانتظار'));
+    await tester.pumpAndSettle();
+  }
   await tester.scrollUntilVisible(
     find.text('تسجيل التحصيل فقط'),
     180,
@@ -75,9 +81,21 @@ Future<void> collect(WidgetTester tester) async {
   );
   await tester.tap(find.text('تسجيل التحصيل فقط'));
   await tester.pumpAndSettle();
+  if (find.text('استلمت النقد، سجله').evaluate().isNotEmpty) {
+    await tester.tap(find.text('استلمت النقد، سجله')); await tester.pumpAndSettle();
+  }
 }
 
 void main() {
+  setUp(() {
+    final view = TestWidgetsFlutterBinding.instance.platformDispatcher.views.single;
+    view.physicalSize = const Size(900, 1800);
+    view.devicePixelRatio = 1;
+  });
+  tearDown(() {
+    final view = TestWidgetsFlutterBinding.instance.platformDispatcher.views.single;
+    view.resetPhysicalSize(); view.resetDevicePixelRatio();
+  });
   testWidgets(
       'confirmed rider cash replacement enables collection after wallet rejection',
       (tester) async {
@@ -235,7 +253,7 @@ void main() {
     expect(repository.collections, isEmpty);
     expect(find.text('الوجهة الحالية: الوجهة الجديدة'), findsOneWidget);
     expect(find.text('منها رسوم تغيير الوجهة: 100 ر.ي'), findsOneWidget);
-    expect(find.text('إجمالي المطلوب تحصيله: 1100 ر.ي'), findsOneWidget);
+    expect(find.text('إجمالي المستحق'), findsOneWidget);
     await collect(tester);
     expect(repository.collections, [1100]);
   });
@@ -248,8 +266,8 @@ void main() {
     repository.latest = ride(waitingFee: 50);
     await collect(tester);
     expect(repository.collections, isEmpty);
-    expect(find.text('إجمالي المطلوب تحصيله: 1150 ر.ي'), findsOneWidget);
-    expect(find.text('صافي مستحقك من الأجرة: 950 ر.ي'), findsOneWidget);
+    expect(find.text('1150 ر.ي'), findsWidgets);
+    expect(find.text('950 ر.ي'), findsWidgets);
     expect(tester.widget<TextField>(find.byType(TextField)).controller!.text,
         '1150');
     await collect(tester);

@@ -7,6 +7,7 @@ import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 import '../../../shared/widgets/app_google_map.dart';
 import '../../../shared/widgets/ride_waiting_panel.dart';
+import '../../../shared/widgets/ride_financial_follow_up.dart';
 import '../../../shared/widgets/ride_route_change_panel.dart';
 import '../controllers/driver_controller.dart';
 import '../repositories/route_repository.dart';
@@ -54,6 +55,8 @@ class _DriverNavigationViewState extends State<DriverNavigationView> {
   String _nextManeuver = '';
   double _bearing = 0;
   double? _passengerBearing;
+  DateTime? _passengerObservedAt;
+  Timer? _locationAgeTimer;
   int _distanceMeters = 0;
   int _durationSeconds = 0;
   int _nextStepDistanceMeters = 0;
@@ -101,6 +104,9 @@ class _DriverNavigationViewState extends State<DriverNavigationView> {
       unawaited(
           _driverController.refreshRide(rideId).catchError((Object _) {}));
     }
+    _locationAgeTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+      if (mounted) setState(() {});
+    });
     unawaited(_loadRoute(_driverPosition!, force: true));
   }
 
@@ -159,6 +165,7 @@ class _DriverNavigationViewState extends State<DriverNavigationView> {
     _passengerPosition =
         location == null ? null : LatLng(location.latitude, location.longitude);
     _passengerBearing = location?.bearing;
+    _passengerObservedAt = location?.observedAtUtc;
   }
 
   void _handlePosition(Position? position) {
@@ -420,6 +427,14 @@ class _DriverNavigationViewState extends State<DriverNavigationView> {
                     mainAxisSize: MainAxisSize.min,
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: <Widget>[
+                      Text(_locationAge(
+                          operationalText('موقعك', 'Your position'),
+                          _driverController.currentPosition.value?.timestamp)),
+                      if (!_followsDestination)
+                        Text(_locationAge(
+                            operationalText('موقع الراكب', 'Rider position'),
+                            _passengerObservedAt)),
+                      const SizedBox(height: 6),
                       if (_followsDestination && _ride != null) ...[
                         Text(
                             '${_ride!['destinationDisplayName'] ?? _ride!['destinationAddress'] ?? 'وجهة الرحلة'}',
@@ -495,6 +510,20 @@ class _DriverNavigationViewState extends State<DriverNavigationView> {
         ),
       );
 
+  String _locationAge(String label, DateTime? observed) {
+    if (observed == null)
+      return operationalText('$label: لا يتوفر تحديث موقع موثوق.',
+          '$label: no verified location update.');
+    final seconds = DateTime.now()
+        .toUtc()
+        .difference(observed.toUtc())
+        .inSeconds
+        .clamp(0, 2147483647);
+    return operationalText(
+        '$label: آخر تحديث منذ $seconds ثانية. الخريطة تعرض آخر موقع مستلم.',
+        '$label: last update $seconds seconds ago. The map shows the last received position.');
+  }
+
   IconData _maneuverIcon(String maneuver) {
     final value = maneuver.toUpperCase();
     if (value.contains('LEFT')) return Icons.turn_left_rounded;
@@ -512,6 +541,7 @@ class _DriverNavigationViewState extends State<DriverNavigationView> {
     _passengerLocationWorker.dispose();
     _rideWorker.dispose();
     _markerAnimationTimer?.cancel();
+    _locationAgeTimer?.cancel();
     super.dispose();
   }
 }

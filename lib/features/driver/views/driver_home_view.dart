@@ -1,10 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
+import '../../../shared/widgets/account_follow_up.dart';
 import '../../../shared/widgets/app_brand_icon.dart';
 import '../controllers/driver_controller.dart';
 import '../widgets/driver_design.dart';
 import '../widgets/driver_ride_card.dart';
 import '../widgets/request_view_tracker.dart';
+import '../../../core/services/driver_location_tracker.dart';
+import '../../../core/realtime/tracking_hub_service.dart';
 
 class DriverHomeView extends StatefulWidget {
   const DriverHomeView({super.key});
@@ -21,6 +24,20 @@ class _DriverHomeViewState extends State<DriverHomeView> {
   bool _mine(Map<String, Object?> ride) =>
       controller.currentUserId != null &&
       '${ride['driverId']}' == '${controller.currentUserId}';
+
+  String _locationMessage() => switch (controller.locationStatus.value) {
+        DriverLocationStatus.serviceDisabled => 'GPS غير مفعل · اضغط للتفعيل',
+        DriverLocationStatus.permissionDenied ||
+        DriverLocationStatus.permissionDeniedForever =>
+          'صلاحية الموقع مطلوبة · اضغط لمنحها',
+        DriverLocationStatus.unavailable =>
+          'تعذر قراءة GPS · تجري إعادة المحاولة تلقائياً',
+        DriverLocationStatus.locating => 'جارٍ تحديد موقعك تلقائياً…',
+        DriverLocationStatus.tracking =>
+          controller.lastLocationSentAt.value == null
+              ? 'تم تحديد موقعك · جارٍ الاتصال بالخادم'
+              : 'تتبع GPS يعمل · موقعك يتحدث تلقائياً',
+      };
 
   @override
   Widget build(BuildContext context) => Scaffold(
@@ -41,8 +58,8 @@ class _DriverHomeViewState extends State<DriverHomeView> {
                 final assigned = controller.rides
                     .where(_mine)
                     .where(
-                      (r) =>
-                          [3, 4, 5, 8, 9].contains(int.tryParse('${r['status']}')),
+                      (r) => [3, 4, 5, 8, 9]
+                          .contains(int.tryParse('${r['status']}')),
                     )
                     .length;
                 return RefreshIndicator(
@@ -113,6 +130,31 @@ class _DriverHomeViewState extends State<DriverHomeView> {
                         trailing: const AppBrandIcon(size: 32),
                       ),
                       const SizedBox(height: 16),
+                      OutlinedButton.icon(
+                          onPressed: () =>
+                              Get.to<void>(() => const AccountFollowUp()),
+                          icon: const Icon(Icons.support_agent),
+                          label: const Text('الدعم ومتابعة الحساب')),
+                      SwitchListTile(
+                        title: const Text('استقبال طلبات جديدة'),
+                        subtitle: Text(controller
+                                    .profile.value?['isApproved'] !=
+                                true
+                            ? 'بانتظار اعتماد الإدارة'
+                            : controller.profile.value?['isAvailable'] != true
+                                ? 'غير متاح بحسب الإدارة أو الالتزام الحالي'
+                                : (int.tryParse('${controller.profile.value?['approvedPassengerSeats'] ?? ''}') ??
+                                            0) <=
+                                        0
+                                    ? 'الطلبات متوقفة: يجب أن تعتمد الإدارة عدد مقاعد الركاب'
+                                    : 'اختيارك محفوظ بعد انتهاء الرحلات'),
+                        value:
+                            controller.profile.value?['acceptsNewRequests'] ==
+                                true,
+                        onChanged: controller.changingReadiness.value
+                            ? null
+                            : controller.changeReadiness,
+                      ),
                       Row(
                         children: [
                           _metric(
@@ -152,9 +194,7 @@ class _DriverHomeViewState extends State<DriverHomeView> {
                                 const SizedBox(width: 10),
                                 Expanded(
                                   child: Text(
-                                    controller.currentPosition.value == null
-                                        ? 'حدّث موقعك لرحلات أقرب إليك'
-                                        : 'موقعك محدّث · اضغط للتحديث',
+                                    _locationMessage(),
                                     style:
                                         Theme.of(context).textTheme.bodySmall,
                                   ),
@@ -176,6 +216,18 @@ class _DriverHomeViewState extends State<DriverHomeView> {
                             style: Theme.of(context).textTheme.titleLarge,
                           ),
                           const Spacer(),
+                          Text(
+                            Get.isRegistered<TrackingHubService>() &&
+                                    Get.find<TrackingHubService>()
+                                        .isConnected
+                                        .value
+                                ? 'تحديث مباشر'
+                                : 'مزامنة تلقائية',
+                            style: Theme.of(context)
+                                .textTheme
+                                .bodySmall
+                                ?.copyWith(fontSize: 11),
+                          ),
                           IconButton(
                             tooltip: 'تحديث الطلبات',
                             onPressed: controller.load,

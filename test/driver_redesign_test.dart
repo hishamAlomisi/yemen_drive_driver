@@ -24,6 +24,13 @@ class _Repository implements DriverRepository {
   @override
   Future<Map<String, Object?>> getRideForPayment(int rideId) async => {
         'id': rideId,
+        'paymentMethodCode': 'cash',
+        'finance': {
+          'amountDue': 2600,
+          'paidAmount': 0,
+          'refundedAmount': 0,
+          'outstandingAmount': 2600
+        },
         'customerPrice': 2500,
         'serviceFee': 100,
         'totalAmount': 2600,
@@ -68,7 +75,7 @@ class _Driver extends DriverController {
   }
 
   @override
-  Future<void> loadWallet() async {}
+  Future<void> loadWallet({bool quiet = false}) async {}
   @override
   Future<void> loadDriverAccount() async {}
 }
@@ -244,6 +251,39 @@ void main() {
     expect(login.otpController.text, '123456');
   });
 
+  testWidgets('ride actions fit narrow screens with larger Arabic labels',
+      (tester) async {
+    final card = Scaffold(
+        body: SingleChildScrollView(
+            child: Padding(
+      padding: const EdgeInsets.all(16),
+      child: DriverRideCard(ride: {
+        ...sampleRide,
+        'driverId': 42,
+        'status': 4,
+        'destinationAvailable': true
+      }),
+    )));
+    await mount(tester, card);
+    await preview(tester, 'ride-actions');
+    await mount(tester, card, width: 320, scale: 1.4);
+    expect(find.text('تأكيد الوصول'), findsOneWidget);
+    expect(find.text('إلغاء الرحلة'), findsOneWidget);
+    final arrivalCard = Scaffold(body: SingleChildScrollView(child: DriverRideCard(ride: {
+      ...sampleRide,
+      'driverId': 42,
+      'status': 9,
+      'paymentMethodCode': 'cash',
+      'destinationAvailable': true,
+    })));
+    await mount(tester, arrivalCard);
+    await preview(tester, 'ride-arrival-actions');
+    await mount(tester, arrivalCard, width: 320, scale: 1.4);
+    expect(find.byTooltip('تنبيه الراكب'), findsOneWidget);
+    expect(find.byTooltip('نتيجة التواصل'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+  });
+
   testWidgets('home filters requests without removing assigned rides',
       (tester) async {
     await mount(tester, const DriverHomeView(), height: 1000);
@@ -380,11 +420,14 @@ void main() {
       ),
     );
     await preview(tester, 'payment');
-    expect(find.text('2600 ر.ي'), findsOneWidget);
+    expect(find.text('2600 ر.ي'), findsWidgets);
+    await tester.scrollUntilVisible(find.byType(TextField), 180,
+        scrollable: find.byType(Scrollable).first);
     await tester.enterText(find.byType(TextField), '3000');
     await tester.pumpAndSettle();
-    expect(find.text('الزيادة لمحفظة العميل: 400 ر.ي'), findsOneWidget);
-    expect(find.text('إجمالي مديونيتك بعد التحصيل: 750 ر.ي'), findsOneWidget);
+    expect(
+        find.textContaining('الباقي الواجب إعادته: 400 ر.ي'), findsOneWidget);
+    expect(find.textContaining('الزيادة لمحفظة العميل'), findsNothing);
     expect(tester.takeException(), isNull);
   });
 }

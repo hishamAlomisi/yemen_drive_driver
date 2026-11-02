@@ -6,6 +6,7 @@ import '../models/driver_ride_payment_state.dart';
 import '../views/driver_chat_view.dart';
 import 'driver_design.dart';
 import 'driver_arrival_panel.dart';
+import 'driver_ride_actions.dart';
 import '../../../shared/widgets/ride_waiting_panel.dart';
 import '../../../shared/widgets/ride_route_change_panel.dart';
 
@@ -19,6 +20,24 @@ class DriverRideCard extends GetView<DriverController> {
     final state = int.tryParse('${ride['status']}') ?? 0;
     final payment = DriverRidePaymentState(ride);
     final offerStatus = int.tryParse('${ride['driverOfferStatus']}');
+    final communication = <Widget>[
+      if (assigned && {3, 4, 5, 8, 9}.contains(state)) ...[
+        IconButton.outlined(
+          tooltip: 'محادثة العميل',
+          iconSize: 18,
+          onPressed: () =>
+              Get.to<void>(() => DriverChatView(rideId: '${ride['id']}')),
+          icon: const Icon(Icons.chat_bubble_outline),
+        ),
+        const SizedBox(width: 6),
+        IconButton.outlined(
+          tooltip: 'اتصال بالعميل',
+          iconSize: 18,
+          onPressed: () => _callCustomer(ride['customerPhone']),
+          icon: const Icon(Icons.phone_outlined),
+        ),
+      ],
+    ];
     final canSendOrEditOffer = !assigned &&
         ride['driverId'] == null &&
         (state == 1 || state == 2) &&
@@ -38,10 +57,107 @@ class DriverRideCard extends GetView<DriverController> {
       8: 'طلب إلغاء قيد المراجعة',
       9: 'وصل السائق إلى نقطة الانطلاق',
     };
+    final actions = <Widget>[
+      if (canSendOrEditOffer)
+        DriverRideAction(
+          onPressed: () => controller.sendOffer(ride),
+          icon: const Icon(Icons.local_offer_outlined),
+          label: Text(
+            (offerStatus == 2 || offerStatus == 3)
+                ? 'إرسال عرض جديد'
+                : ride['driverOfferAmount'] != null
+                    ? 'تعديل العرض'
+                    : 'إرسال عرض',
+          ),
+        ),
+      if (!assigned && ride['pickupLatitude'] != null)
+        DriverRideAction(
+          outlined: true,
+          onPressed: () => controller.openPickupNavigation(ride),
+          icon: const Icon(Icons.navigation_outlined),
+          label: const Text('مسار الانطلاق'),
+        ),
+      if (assigned && state == 3)
+        DriverRideAction(
+          onPressed: () => controller.updateStatus(ride, 4, 'في الطريق'),
+          icon: const Icon(Icons.directions_car),
+          label: const Text('بدء التوجه'),
+        ),
+      if (assigned && ride['destinationAvailable'] == true)
+        DriverRideAction(
+          outlined: true,
+          onPressed: () => controller.openDestinationNavigation(ride),
+          icon: const Icon(Icons.route_outlined),
+          label: const Text('مسار الوجهة'),
+        ),
+      if (assigned && state == 4)
+        DriverRideAction(
+          onPressed: () =>
+              controller.updateStatus(ride, 9, 'وصلت إلى نقطة الانطلاق'),
+          icon: const Icon(Icons.place_outlined),
+          label: const Text('تأكيد الوصول'),
+        ),
+      if (assigned && state == 9)
+        DriverRideAction(
+          onPressed: payment.startBlocked
+              ? null
+              : () => controller.updateStatus(ride, 5, 'بدأت الرحلة'),
+          icon: const Icon(Icons.play_arrow),
+          label: const Text('بدء الرحلة'),
+        ),
+      if (assigned && state == 5) ...[
+        if (!payment.completed) ...[
+          if (payment.cashSelected)
+            DriverRideAction(
+              onPressed: payment.pending
+                  ? null
+                  : () => controller.openCashPayment(ride),
+              icon: const Icon(Icons.payments_outlined),
+              label: const Text('تحصيل الدفع'),
+            ),
+          DriverRideAction(
+            onPressed: payment.pending
+                ? null
+                : () => controller.enableCustomerPayment(ride),
+            icon: const Icon(Icons.credit_score_outlined),
+            label: const Text('تمكين الدفع'),
+          ),
+        ],
+        DriverRideAction(
+          onPressed: () => controller.finishTransport(ride),
+          icon: const Icon(Icons.flag_rounded),
+          label: const Text('إنهاء الرحلة'),
+        ),
+      ],
+      if (assigned && {5, 6, 7}.contains(state))
+        DriverRideAction(
+            outlined: true,
+            onPressed: () => controller.openFinancialFollowUp(ride),
+            icon: const Icon(Icons.receipt_long),
+            label: const Text('الفاتورة والمتابعة المالية')),
+      if (assigned &&
+          state == 6 &&
+          ride['cashPaymentRequestStatus'] == 1 &&
+          ride['paymentCompleted'] != true &&
+          ride['walletPaymentPending'] != true)
+        DriverRideAction(
+          outlined: true,
+          onPressed: () => controller.openCashPayment(ride),
+          icon: const Icon(Icons.payments_outlined),
+          label: const Text('تسجيل تحصيل نقدي بطلب العميل'),
+        ),
+      if (assigned && {3, 4, 5, 9}.contains(state))
+        DriverRideAction(
+          outlined: true,
+          onPressed: () => controller.requestCancellation(ride),
+          icon: const Icon(Icons.cancel_outlined),
+          label: Text(state == 5 ? 'طلب إلغاء الرحلة' : 'إلغاء الرحلة'),
+        ),
+    ];
     return Card(
       margin: const EdgeInsets.only(bottom: 16),
       child: Padding(
-        padding: const EdgeInsets.all(20),
+        padding: const EdgeInsets.all(16),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
@@ -80,7 +196,7 @@ class DriverRideCard extends GetView<DriverController> {
                 ),
               ],
             ),
-            const SizedBox(height: 20),
+            const SizedBox(height: 12),
             RideRoute(ride: ride),
             if (ride['pickupDistanceMeters'] != null) ...[
               const SizedBox(height: 4),
@@ -88,7 +204,7 @@ class DriverRideCard extends GetView<DriverController> {
                 'يبعد عنك ${_distanceText(ride['pickupDistanceMeters'])}',
               ),
             ],
-            const Divider(height: 30),
+            const Divider(height: 20),
             Row(
               crossAxisAlignment: CrossAxisAlignment.center,
               children: [
@@ -179,123 +295,18 @@ class DriverRideCard extends GetView<DriverController> {
               ),
             ],
             const SizedBox(height: 10),
-            if (canSendOrEditOffer)
-              FilledButton.icon(
-                onPressed: () => controller.sendOffer(ride),
-                icon: const Icon(Icons.local_offer_outlined),
-                label: Text(
-                  (offerStatus == 2 || offerStatus == 3)
-                      ? 'إرسال عرض جديد'
-                      : ride['driverOfferAmount'] != null
-                          ? 'تعديل العرض'
-                          : 'إرسال عرض',
-                ),
-              ),
-            if (!assigned && ride['pickupLatitude'] != null)
-              OutlinedButton.icon(
-                onPressed: () => controller.openPickupNavigation(ride),
-                icon: const Icon(Icons.navigation_outlined),
-                label: const Text('فتح مسار إلى نقطة الانطلاق'),
-              ),
-            if (assigned && state == 3)
-              FilledButton.icon(
-                onPressed: () => controller.updateStatus(ride, 4, 'في الطريق'),
-                icon: const Icon(Icons.directions_car),
-                label: const Text('بدء التوجه'),
-              ),
-            if (assigned && ride['destinationAvailable'] == true)
-              OutlinedButton.icon(
-                onPressed: () => controller.openDestinationNavigation(ride),
-                icon: const Icon(Icons.route_outlined),
-                label: const Text('فتح مسار الوجهة'),
-              ),
-            if (assigned && state == 4)
-              FilledButton.icon(
-                onPressed: () =>
-                    controller.updateStatus(ride, 9, 'وصلت إلى نقطة الانطلاق'),
-                icon: const Icon(Icons.place_outlined),
-                label: const Text('تأكيد الوصول إلى الراكب'),
-              ),
-            if (assigned && state == 9) DriverArrivalPanel(rideId: int.parse('${ride['id']}')),
-            if (assigned && state == 9)
-              FilledButton.icon(
-                onPressed: payment.startBlocked
-                    ? null
-                    : () => controller.updateStatus(ride, 5, 'بدأت الرحلة'),
-                icon: const Icon(Icons.play_arrow),
-                label: const Text('بدء الرحلة'),
-              ),
-            if (assigned && state == 5) ...[
-              if (!payment.completed) ...[
-                FilledButton.icon(
-                  onPressed: payment.pending
-                      ? null
-                      : () => controller.openCashPayment(ride),
-                  icon: const Icon(Icons.payments_outlined),
-                  label: const Text('تحصيل الدفع'),
-                ),
-                const SizedBox(height: 8),
-                FilledButton.icon(
-                  onPressed: payment.pending
-                      ? null
-                      : () => controller.enableCustomerPayment(ride),
-                  icon: const Icon(Icons.credit_score_outlined),
-                  label: const Text('تمكين طرق الدفع للعميل'),
-                ),
-                const SizedBox(height: 8),
-              ],
-              FilledButton.icon(
-                onPressed: payment.completed
-                    ? () => controller.updateStatus(ride, 6, 'مكتملة')
-                    : null,
-                icon: const Icon(Icons.flag_rounded),
-                label: const Text('إنهاء الرحلة'),
-              ),
-              const SizedBox(height: 8),
-              OutlinedButton.icon(
-                onPressed: () => Get.to<void>(
-                  () => DriverChatView(rideId: '${ride['id']}'),
-                ),
-                icon: const Icon(Icons.chat_bubble_outline),
-                label: const Text('محادثة العميل'),
-              ),
-              const SizedBox(height: 8),
-              OutlinedButton.icon(
-                onPressed: () => _callCustomer(ride['customerPhone']),
-                icon: const Icon(Icons.phone_outlined),
-                label: const Text('اتصال بالعميل'),
-              ),
-            ],
-            if (assigned &&
-                state == 6 &&
-                ride['cashPaymentRequestStatus'] == 1 &&
-                ride['paymentCompleted'] != true &&
-                ride['walletPaymentPending'] != true)
-              OutlinedButton.icon(
-                onPressed: () => controller.openCashPayment(ride),
-                icon: const Icon(Icons.payments_outlined),
-                label: const Text('تسجيل تحصيل نقدي بطلب العميل'),
-              ),
-            if (assigned && (state == 4 || state == 9))
-              OutlinedButton.icon(
-                onPressed: () => Get.to<void>(
-                  () => DriverChatView(rideId: '${ride['id']}'),
-                ),
-                icon: const Icon(Icons.chat_bubble_outline),
-                label: const Text('محادثة العميل'),
-              ),
-            if (assigned && (state == 3 || state == 4 || state == 9))
-              OutlinedButton.icon(
-                onPressed: () => _callCustomer(ride['customerPhone']),
-                icon: const Icon(Icons.phone_outlined),
-                label: const Text('اتصال بالعميل'),
-              ),
-            if (assigned && {3, 4, 5, 9}.contains(state))
-              OutlinedButton.icon(
-                onPressed: () => controller.requestCancellation(ride),
-                icon: const Icon(Icons.cancel_outlined),
-                label: Text(state == 5 ? 'طلب إلغاء الرحلة' : 'إلغاء الرحلة'),
-              ),
+            if (communication.isNotEmpty &&
+                !(state == 9 && ride['passengerBoardedAtUtc'] == null))
+              Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: communication),
+            if (assigned && state == 9 && ride['passengerBoardedAtUtc'] == null)
+              DriverArrivalPanel(
+                  rideId: int.parse('${ride['id']}'),
+                  actions: actions,
+                  communicationActions: communication)
+            else
+              DriverRideActions(actions: actions),
           ],
         ),
       ),

@@ -7,6 +7,7 @@ import 'package:get/get.dart';
 import '../../core/network/api_client.dart';
 import '../../core/network/api_models.dart';
 import '../models/ride_route_change_snapshot.dart';
+import 'ride_financial_follow_up.dart';
 
 export '../models/ride_route_change_snapshot.dart' show RideRouteDestination;
 
@@ -18,6 +19,7 @@ class RideRouteChangePanel extends StatefulWidget {
     required this.selectDestination,
     this.isDriver = false,
     this.onRouteChanged,
+    this.onPayDifference,
     super.key,
   });
 
@@ -25,6 +27,7 @@ class RideRouteChangePanel extends StatefulWidget {
   final bool isDriver;
   final Future<RideRouteDestination?> Function() selectDestination;
   final Future<void> Function()? onRouteChanged;
+  final Future<void> Function()? onPayDifference;
 
   @override
   State<RideRouteChangePanel> createState() => _RideRouteChangePanelState();
@@ -306,6 +309,16 @@ class _RideRouteChangePanelState extends State<RideRouteChangePanel>
         if (request != null) ...[
           Text(_statusText(request, expired, other)),
           Text(request.destination.label),
+          if (request.status == 'accepted' &&
+              request.invoice.hasSettlement) ...[
+            Text(
+                'المتبقي: ${request.invoice['remainingAmount'].toStringAsFixed(0)} ر.ي — المسترد المستحق: ${request.invoice['refundAmount'].toStringAsFixed(0)} ر.ي'),
+            TextButton.icon(
+                onPressed: () => Get.to<void>(() => RideFinancialFollowUp(
+                    rideId: widget.rideId, isDriver: widget.isDriver)),
+                icon: const Icon(Icons.receipt_long),
+                label: const Text('الفاتورة وتسوية الفرق والاسترداد')),
+          ],
           Text(
               'الإجمالي المقترح: ${request.invoice['newTotal'].toStringAsFixed(0)} ر.ي'),
           if (request.isOpen && !expired)
@@ -314,7 +327,9 @@ class _RideRouteChangePanelState extends State<RideRouteChangePanel>
           if (request.isOpen)
             const Text(
                 'تستمر الرحلة بوجهتها الحالية حتى موافقة الطرف الآخر. يُعاد التسعير عند تحرك السيارة أو انتهاء العرض.'),
-          if ((request.canConfirm && request.requestedByMe && !widget.isDriver) ||
+          if ((request.canConfirm &&
+                  request.requestedByMe &&
+                  !widget.isDriver) ||
               (request.canDecide && !request.requestedByMe && widget.isDriver))
             FilledButton(
                 onPressed: blocked ? null : () => _review(request),
@@ -358,6 +373,8 @@ class _RideRouteChangePanelState extends State<RideRouteChangePanel>
       'pending' => request.requestedByMe
           ? 'بانتظار موافقة $other.'
           : 'طلب $other تغيير الوجهة. راجع الفاتورة.',
+      'awaiting_payment' =>
+        'وافق السائق. تبقى الوجهة الحالية حتى سداد فرق الزيادة من شاشة الدفع؛ يمكنك سحب التغيير.',
       'accepted' => 'تمت الموافقة على الوجهة والفاتورة الجديدة.',
       'rejected' => 'رُفض الطلب. تستمر الرحلة بالوجهة الحالية.',
       'cancelled' => 'سُحب طلب تغيير الوجهة.',
@@ -408,6 +425,15 @@ class RideRouteChangeInvoiceView extends StatelessWidget {
           const Divider(),
           money('الإجمالي الجديد', 'newTotal'),
           money('الفرق عن السابق', 'difference'),
+          if (invoice.hasSettlement) ...[
+            money('إجمالي المدفوع سابقاً', 'paidAmount'),
+            money('المسترد سابقاً', 'refundedAmount'),
+            money('صافي المدفوع المحتسب', 'netPaid'),
+            money('المتبقي بعد اعتماد الوجهة', 'remainingAmount'),
+            money('الزيادة المستحقة للراكب', 'refundAmount'),
+            const Text(
+                'تُحتسب الدفعات السابقة. يمكن سداد الفرق إلكترونياً أو نقداً؛ يُسجل غير المسدد عند انتهاء النقل كمديونية. يُعاد الفائض نقداً أو للمحفظة باختيار الراكب، ولا تُعاد رسوم الخدمة.'),
+          ],
           const SizedBox(height: 8),
           const Text(
               'لن تتغير الوجهة أو الأجرة إلا بعد موافقة الطرف الآخر. إذا تغير موقع السيارة أو انتهت المهلة، يلزم عرض جديد.'),

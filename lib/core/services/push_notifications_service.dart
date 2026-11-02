@@ -27,7 +27,9 @@ Future<void> firebasePushBackgroundHandler(RemoteMessage message) async {
     final client = await ApiClient(SecureStorageService()).init();
     try {
       await showVerifiedRideRequestAlert(client, message.data);
-    } finally { client.dio.close(); }
+    } finally {
+      client.dio.close();
+    }
   }
 }
 
@@ -310,7 +312,8 @@ class PushNotificationsService extends GetxService with WidgetsBindingObserver {
   Future<void> _showForegroundNotification(RemoteMessage message) async {
     if (message.data['action'] == 'open_ride_offer') {
       await showVerifiedRideRequestAlert(_client, message.data,
-          notifications: _localNotifications);
+          notifications: _localNotifications,
+          userId: _session.currentUserId.value);
       return;
     }
     final notification = message.notification;
@@ -342,17 +345,24 @@ class PushNotificationsService extends GetxService with WidgetsBindingObserver {
     );
   }
 
-  Future<void> showRideRequestNotification(Map<String, Object?> notification) async {
+  Future<void> showRideRequestNotification(
+      Map<String, Object?> notification) async {
     if (!_isEligible) return;
     try {
       final data = jsonDecode('${notification['dataJson'] ?? '{}'}');
       if (data is! Map || data['action'] != 'open_ride_offer') return;
-      await showVerifiedRideRequestAlert(_client, {
-        ...Map<String, dynamic>.from(data),
-        'notificationId': notification['id'], 'title': notification['title'],
-        'body': notification['body'], 'createdAtUtc': notification['createdAtUtc'],
-      }, notifications: _localNotifications);
-    } on Object { /* Malformed legacy notifications do not alert. */ }
+      await showVerifiedRideRequestAlert(
+          _client,
+          {
+            ...Map<String, dynamic>.from(data),
+            'notificationId': notification['id'],
+            'title': notification['title'],
+            'body': notification['body'],
+            'createdAtUtc': notification['createdAtUtc'],
+          },
+          notifications: _localNotifications,
+          userId: _session.currentUserId.value);
+    } on Object {/* Malformed legacy notifications do not alert. */}
   }
 
   void _openPayload(String? payload) {

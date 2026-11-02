@@ -94,6 +94,20 @@ class _WalletTab extends StatelessWidget {
                 icon: Icons.account_balance_wallet_rounded,
               ),
               const SizedBox(height: 12),
+              if (controller.walletLedgerDebt.value > 0)
+                Card(
+                    child: Padding(
+                        padding: const EdgeInsets.all(16),
+                        child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              Text(
+                                  'مديونية المحفظة: ${controller.walletLedgerDebt.value.toStringAsFixed(2)} ر.ي',
+                                  style: const TextStyle(
+                                      fontWeight: FontWeight.bold)),
+                              const Text(
+                                  'تسدد الإيداعات القادمة المديونية أولاً، ثم يضاف المتبقي إلى الرصيد المتاح.'),
+                            ]))),
               if (controller.financialFiltersVisible.value)
                 _FinancialFilters(controller),
               const SizedBox(height: 16),

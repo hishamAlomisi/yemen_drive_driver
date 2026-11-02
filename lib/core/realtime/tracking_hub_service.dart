@@ -4,6 +4,7 @@ import 'package:get/get.dart';
 import 'package:signalr_netcore/signalr_client.dart';
 
 import '../config/app_environment.dart';
+import '../network/api_client.dart';
 import '../storage/secure_storage_service.dart';
 
 /// Owns the authenticated tracking Hub connection for an active ride.
@@ -75,14 +76,25 @@ class TrackingHubService extends GetxService {
   }
 
   Future<bool> publishDriverLocation(Map<String, Object?> payload) async {
-    await _ensureConnected();
-    final connection = _connection;
-    if (connection == null ||
-        connection.state != HubConnectionState.Connected) {
-      return false;
-    }
     try {
-      await connection.invoke('PublishDriverLocation', args: <Object>[payload]);
+      await _ensureConnected().timeout(const Duration(seconds: 5));
+    } on Object {/* Keep HTTP GPS updates available while Hub reconnects. */}
+    final connection = _connection;
+    if (connection != null &&
+        connection.state == HubConnectionState.Connected) {
+      try {
+        await connection.invoke('PublishDriverLocation',
+            args: <Object>[payload]).timeout(const Duration(seconds: 12));
+        return true;
+      } on Object {
+        /* Retry the same timestamp through the authenticated API. */
+      }
+    }
+    if (!Get.isRegistered<ApiClient>()) return false;
+    try {
+      await Get.find<ApiClient>()
+          .dio
+          .post<Object?>('tracking/driver-location', data: payload);
       return true;
     } on Object {
       return false;
@@ -187,6 +199,7 @@ class TrackingHubService extends GetxService {
       'offerUpdated',
       'rideStatusUpdated',
       'rideArrivalUpdated',
+      'rideCancellationUpdated',
       'rideMessageCreated',
       'paymentUpdated',
       'cashApprovalUpdated',

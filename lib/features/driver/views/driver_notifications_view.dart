@@ -6,28 +6,38 @@ import 'package:get/get.dart';
 import '../../../shared/widgets/ride_route_change_panel.dart';
 import '../../../shared/widgets/ride_waiting_panel.dart';
 import '../controllers/driver_controller.dart';
+import '../driver_routes.dart';
 
 class DriverNotificationsView extends GetView<DriverController> {
   const DriverNotificationsView({super.key});
 
   @override
-  Widget build(BuildContext context) => Scaffold(
-        appBar: AppBar(title: const Text('الإشعارات')),
-        body: Obx(() => RefreshIndicator(
-              onRefresh: () => controller.load(showLoading: false),
-              child: ListView(
-                physics: const AlwaysScrollableScrollPhysics(),
-                padding: const EdgeInsets.all(16),
-                children: [
-                  if (controller.notifications.isEmpty)
-                    const Padding(
-                        padding: EdgeInsets.all(32),
-                        child: Text('لا توجد إشعارات.')),
-                  for (final item in controller.notifications)
-                    _NotificationCard(key: ValueKey(item['id']), item: item),
-                ],
-              ),
-            )),
+  Widget build(BuildContext context) => PopScope(
+        canPop: false,
+        onPopInvokedWithResult: (didPop, result) {
+          if (!didPop) Get.offAllNamed<void>(DriverRoutes.home);
+        },
+        child: Scaffold(
+          appBar: AppBar(
+              title: const Text('الإشعارات'),
+              leading: BackButton(
+                  onPressed: () => Get.offAllNamed<void>(DriverRoutes.home))),
+          body: Obx(() => RefreshIndicator(
+                onRefresh: () => controller.load(showLoading: false),
+                child: ListView(
+                  physics: const AlwaysScrollableScrollPhysics(),
+                  padding: const EdgeInsets.all(16),
+                  children: [
+                    if (controller.notifications.isEmpty)
+                      const Padding(
+                          padding: EdgeInsets.all(32),
+                          child: Text('لا توجد إشعارات.')),
+                    for (final item in controller.notifications)
+                      _NotificationCard(key: ValueKey(item['id']), item: item),
+                  ],
+                ),
+              )),
+        ),
       );
 }
 
@@ -125,20 +135,54 @@ class _NotificationCardState extends State<_NotificationCard> {
                     if (request == null) return const LinearProgressIndicator();
                     if (request['canChooseRefundMethod'] == true) {
                       final quote = request['refundQuote'] as Map? ?? {};
-                      return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-                        const Text('اكتملت الموافقات؛ اختر طريقة إعادة المبلغ'),
-                        Text('المبلغ المدفوع: ${quote['paidAmount']} ريال يمني'),
-                        Text('الجزء المقطوع: ${quote['travelledFare']} · رسوم الرحلة: ${quote['serviceFee']} · رسوم الإلغاء: ${quote['cancellationFee']}'),
-                        Text('إجمالي الخصم: ${quote['totalDeductions']} · صافي الاسترداد: ${quote['refundAmount']} ريال يمني'),
-                        RadioListTile<int>(value: 2, groupValue: _refundMethod, onChanged: _busy ? null : (value) => setState(() => _refundMethod = value!), title: const Text('إرجاع إلى محفظة الراكب')),
-                        RadioListTile<int>(value: 1, groupValue: _refundMethod, onChanged: _busy ? null : (value) => setState(() => _refundMethod = value!), title: const Text('إرجاع نقداً إلى الراكب')),
-                        FilledButton(key: const ValueKey('confirm-cancellation-refund-method'), onPressed: _busy ? null : () => _decide(() => controller.chooseCancellationRefund(
-                            cancellationId!, _refundMethod, (request['refundChoiceRevision'] as num).toInt())),
-                            child: Text(_refundMethod == 2 ? 'طلب موافقة الراكب على المحفظة' : 'أؤكد أنني أعدت صافي المبلغ نقداً')),
-                      ]);
+                      return Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            const Text(
+                                'اكتملت الموافقات؛ اختر طريقة إعادة المبلغ'),
+                            Text(
+                                'المبلغ المدفوع: ${quote['paidAmount']} ريال يمني'),
+                            Text(
+                                'الجزء المقطوع: ${quote['travelledFare']} · رسوم الرحلة: ${quote['serviceFee']} · رسوم الإلغاء: ${quote['cancellationFee']}'),
+                            Text(
+                                'إجمالي الخصم: ${quote['totalDeductions']} · صافي الاسترداد: ${quote['refundAmount']} ريال يمني'),
+                            RadioListTile<int>(
+                                value: 2,
+                                groupValue: _refundMethod,
+                                onChanged: _busy
+                                    ? null
+                                    : (value) =>
+                                        setState(() => _refundMethod = value!),
+                                title: const Text('إرجاع إلى محفظة الراكب')),
+                            RadioListTile<int>(
+                                value: 1,
+                                groupValue: _refundMethod,
+                                onChanged: _busy
+                                    ? null
+                                    : (value) =>
+                                        setState(() => _refundMethod = value!),
+                                title: const Text('إرجاع نقداً إلى الراكب')),
+                            FilledButton(
+                                key: const ValueKey(
+                                    'confirm-cancellation-refund-method'),
+                                onPressed: _busy
+                                    ? null
+                                    : () => _decide(() =>
+                                        controller.chooseCancellationRefund(
+                                            cancellationId!,
+                                            _refundMethod,
+                                            (request['refundChoiceRevision']
+                                                    as num)
+                                                .toInt())),
+                                child: Text(_refundMethod == 2
+                                    ? 'طلب موافقة الراكب على المحفظة'
+                                    : 'أؤكد أنني أعدت صافي المبلغ نقداً')),
+                          ]);
                     }
                     if (request['canDecide'] != true)
-                      return Text(request['refundConsentPending'] == true ? 'بانتظار موافقة الراكب على الاسترداد إلى المحفظة.' : 'لا يوجد قرار مطلوب لهذا الطلب.');
+                      return Text(request['refundConsentPending'] == true
+                          ? 'بانتظار موافقة الراكب على الاسترداد إلى المحفظة.'
+                          : 'لا يوجد قرار مطلوب لهذا الطلب.');
                     return Column(
                         crossAxisAlignment: CrossAxisAlignment.stretch,
                         children: [

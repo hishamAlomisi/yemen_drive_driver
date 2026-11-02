@@ -1,3 +1,6 @@
+import 'dart:convert';
+import '../../../core/network/api_models.dart';
+import '../../../core/storage/secure_storage_service.dart';
 import '../../../shared/models/ride_waiting_snapshot.dart';
 import '../models/driver_models.dart';
 import '../providers/driver_provider.dart';
@@ -18,7 +21,10 @@ abstract interface class DriverRepository {
   Future<void> sendOffer(
       {required int rideId, required int driverId, required num amount});
   Future<void> updateRideStatus(
-      {required int rideId, required int status, bool? customerPaymentEnabled});
+      {required int rideId,
+      required int status,
+      bool? customerPaymentEnabled,
+      bool confirmPassengerBoarding = false});
   Future<Map<String, Object?>> registerCashPayment(
       {required int rideId, required num cashReceived});
   Future<Map<String, Object?>> getCashCollectionApproval(int approvalId);
@@ -35,18 +41,24 @@ abstract interface class DriverRepository {
   Future<void> markNotificationRead(int notificationId);
   Future<bool> isRequestAvailable(int rideId);
   Future<Map<String, Object?>> requestRideCancellation(
-      int rideId, String reason);
+      int rideId, String reason,
+      {bool safeStopConfirmed = false});
   Future<Map<String, Object?>> getCancellationRequest(int requestId);
-  Future<void> chooseCancellationRefund(int requestId, int method, int revision);
+  Future<void> chooseCancellationRefund(
+      int requestId, int method, int revision);
 }
 
 class ApiDriverRepository implements DriverRepository {
   const ApiDriverRepository(this._provider);
   final DriverProvider _provider;
   @override
-  Future<void> chooseCancellationRefund(int requestId, int method, int revision) =>
+  Future<void> chooseCancellationRefund(
+          int requestId, int method, int revision) =>
       _provider.execute('RideCancellationRequestModel', 'update', {
-        'id': requestId, 'requestedRefundMethod': method, 'refundChoiceRevision': revision, 'cashReturned': method == 1,
+        'id': requestId,
+        'requestedRefundMethod': method,
+        'refundChoiceRevision': revision,
+        'cashReturned': method == 1,
       });
 
   @override
@@ -57,9 +69,12 @@ class ApiDriverRepository implements DriverRepository {
 
   @override
   Future<Map<String, Object?>> requestRideCancellation(
-          int rideId, String reason) =>
-      _provider.executeData('RideCancellationRequestModel', 'add',
-          {'rideId': rideId, 'reason': reason});
+          int rideId, String reason, {bool safeStopConfirmed = false}) =>
+      _provider.executeData('RideCancellationRequestModel', 'add', {
+        'rideId': rideId,
+        'reason': reason,
+        'safeStopConfirmed': safeStopConfirmed
+      });
 
   @override
   Future<Map<String, Object?>> getCancellationRequest(int requestId) =>
@@ -123,11 +138,16 @@ class ApiDriverRepository implements DriverRepository {
       }
     }
     return {
-      'paymentCompleted':
-          detail['paymentCompleted'] == true || paidPayment != null,
+      'paymentCompleted': detail['paymentCompleted'] == true,
       'walletPaymentPending': detail['walletPaymentPending'] == true,
+      'finance': detail['finance'],
+      'outstandingAmount': detail['outstandingAmount'],
+      'paidAmount': detail['paidAmount'],
+      'refundedAmount': detail['refundedAmount'],
       'paymentMethodNameAr': detail['paymentMethodNameAr'],
+      'paymentMethodNameEn': detail['paymentMethodNameEn'],
       'selectedPaymentMethodNameAr': detail['selectedPaymentMethodNameAr'],
+      'selectedPaymentMethodNameEn': detail['selectedPaymentMethodNameEn'],
       'paymentProvider': detail['paymentProvider'] ?? paidPayment?['provider'],
       if (detail.containsKey('paymentRequiredBeforeStart'))
         'paymentRequiredBeforeStart':
@@ -183,13 +203,7 @@ class ApiDriverRepository implements DriverRepository {
       'get',
       <String, Object?>{'id': rideId},
     );
-    final payments = detail['payments'];
-    return payments is List &&
-        payments.any((raw) {
-          if (raw is! Map) return false;
-          final status = '${raw['status'] ?? ''}'.toLowerCase();
-          return status == '2' || status == 'paid';
-        });
+    return detail['paymentCompleted'] == true;
   }
 
   @override
@@ -214,22 +228,56 @@ class ApiDriverRepository implements DriverRepository {
   Future<void> updateRideStatus(
           {required int rideId,
           required int status,
-          bool? customerPaymentEnabled}) =>
+          bool? customerPaymentEnabled,
+          bool confirmPassengerBoarding = false}) =>
       _provider.execute('RideModel', 'update', <String, Object?>{
         'id': rideId,
         'status': status,
+        if (confirmPassengerBoarding) 'confirmPassengerBoarding': true,
         if (customerPaymentEnabled != null)
           'customerPaymentEnabled': customerPaymentEnabled
       });
 
   @override
   Future<Map<String, Object?>> registerCashPayment(
-          {required int rideId, required num cashReceived}) =>
-      _provider.executeData('DriverCashPaymentModel', 'add', <String, Object?>{
+      {required int rideId, required num cashReceived}) async {
+    final owner = await SecureStorageService.read(key: 'authenticated_user_id');
+    final storageKey = 'cash_receipt_${owner}_$rideId';
+    final persisted = await SecureStorageService.read(key: storageKey);
+    final saved = persisted.isEmpty ? null : jsonDecode(persisted) as Map;
+    if (saved != null && num.tryParse('${saved['amount']}') != cashReceived) {
+      throw const FormatException(
+          'توجد محاولة تحصيل لم تصل نتيجتها. أعد إرسال المبلغ نفسه أولاً لتأكيدها؛ لا تسجل قبضاً جديداً قبل حسمها.');
+    }
+    final reference = saved?['key'] ??
+        'cash-$rideId-${DateTime.now().microsecondsSinceEpoch}';
+    await SecureStorageService.write(
+        key: storageKey,
+        value: jsonEncode({'key': reference, 'amount': '$cashReceived'}));
+    Map<String, Object?> result;
+    try {
+      result = await _provider
+          .executeData('DriverCashPaymentModel', 'add', <String, Object?>{
         'rideId': rideId,
         'cashReceived': cashReceived,
+        'idempotencyKey': reference,
         'currency': 'YER',
       });
+    } on ApiProblemDetails catch (problem) {
+      // Only a definite validation/permission rejection proves no receipt was committed.
+      if (problem.status >= 400 &&
+          problem.status < 500 &&
+          problem.status != 408 &&
+          problem.status != 409 &&
+          problem.status != 429) {
+        await SecureStorageService.delete(key: storageKey);
+      }
+      rethrow;
+    }
+    // A lost response retains this reference, including across app restarts.
+    await SecureStorageService.delete(key: storageKey);
+    return result;
+  }
 
   @override
   Future<Map<String, Object?>> getCashCollectionApproval(int approvalId) =>

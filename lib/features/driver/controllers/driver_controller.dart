@@ -1,8 +1,8 @@
+import '../../../shared/widgets/ride_financial_follow_up.dart';
+import '../../../core/network/api_client.dart';
 import 'dart:async';
 import 'dart:convert';
 
-import 'package:flutter/foundation.dart'
-    show TargetPlatform, defaultTargetPlatform, kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:get/get.dart';
@@ -11,6 +11,7 @@ import '../../../core/network/api_models.dart';
 import '../../../core/realtime/tracking_hub_service.dart';
 import '../../../core/services/auth_session_service.dart';
 import '../../../core/services/push_notifications_service.dart';
+import '../../../core/services/driver_location_tracker.dart';
 import '../driver_routes.dart';
 import '../models/driver_ride_payment_state.dart';
 import '../repositories/driver_repository.dart';
@@ -35,7 +36,7 @@ class PassengerLocationUpdate {
   final DateTime observedAtUtc;
 }
 
-class DriverController extends GetxController {
+class DriverController extends GetxController with WidgetsBindingObserver {
   DriverController(this._repository, this._session);
   final DriverRepository _repository;
   final AuthSessionService _session;
@@ -46,6 +47,7 @@ class DriverController extends GetxController {
   final rides = <Map<String, Object?>>[].obs;
   final notifications = <Map<String, Object?>>[].obs;
   final RxDouble walletBalance = 0.0.obs;
+  final RxDouble walletLedgerDebt = 0.0.obs;
   final walletTransactions = <Map<String, Object?>>[].obs;
   final isWalletLoading = false.obs;
   final isWalletLoaded = false.obs;
@@ -65,8 +67,12 @@ class DriverController extends GetxController {
   final Map<int, Future<void>> _rideRefreshes = {};
   final Set<int> _rideRefreshRequested = {};
   final Map<int, int> _rideSnapshotVersions = {};
-  StreamSubscription<Position>? _locationSubscription;
-  bool _locationPermissionNoticeShown = false;
+  DriverLocationTracker? _locationTracker;
+  final locationStatus = DriverLocationStatus.locating.obs;
+  final Rxn<DateTime> lastLocationSentAt = Rxn<DateTime>();
+  Timer? _automaticSyncTimer;
+  bool _paused = false;
+  bool _refreshQueued = false;
   StreamSubscription<TrackingHubEvent>? _hubEventSubscription;
   StreamSubscription<void>? _hubConnectionSubscription;
   bool _refreshInFlight = false;
@@ -90,10 +96,24 @@ class DriverController extends GetxController {
   @override
   void onReady() {
     super.onReady();
+    WidgetsBinding.instance.addObserver(this);
+    _automaticSyncTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+      if (!_paused && !isClosed && _session.isAuthenticated.value) {
+        unawaited(load(showLoading: false));
+      }
+    });
     unawaited(_startRealtimeAndLocation());
   }
 
   Future<void> _startRealtimeAndLocation() async {
+    _locationTracker = DriverLocationTracker(
+      onPosition: _publishLocation,
+      onStatus: (status) {
+        if (!isClosed) locationStatus.value = status;
+      },
+      onAccessRequired: _showLocationAccessPrompt,
+    );
+    unawaited(_locationTracker!.start());
     await _startRealtimeAndLoad();
     final arguments = Get.arguments;
     if (arguments is Map && arguments['openNotification'] == true) {
@@ -104,7 +124,15 @@ class DriverController extends GetxController {
         );
       }
     }
-    await _startRealLocationUpdates();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _paused = state != AppLifecycleState.resumed;
+    if (_paused || isClosed || !_session.isAuthenticated.value) return;
+    unawaited(_locationTracker?.refresh() ?? Future<void>.value());
+    unawaited(load(showLoading: false));
+    if (isWalletLoaded.value) unawaited(loadWallet(quiet: true));
   }
 
   Future<void> _openPushNotification(Map<String, String> payload) async {
@@ -184,8 +212,9 @@ class DriverController extends GetxController {
       _hubEventSubscription = hub.events.listen(_handleHubEvent);
       _hubConnectionSubscription = hub.connectionRestored.listen((_) {
         if (_initialSnapshotLoaded) unawaited(load(showLoading: false));
+        if (isWalletLoaded.value) unawaited(loadWallet(quiet: true));
       });
-      await hub.setUserEventListening(this, true);
+      unawaited(hub.setUserEventListening(this, true));
     }
     await load();
     _initialSnapshotLoaded = true;
@@ -199,6 +228,7 @@ class DriverController extends GetxController {
     final payload = event.payload;
     if (event.name == 'notificationCreated') {
       unawaited(_refreshNotifications(announceRequests: true));
+      unawaited(loadWallet(quiet: true));
       return;
     }
     final rideId = int.tryParse('${payload['id'] ?? payload['rideId'] ?? ''}');
@@ -206,6 +236,12 @@ class DriverController extends GetxController {
 
     if (event.name == 'passengerLocationUpdated') {
       _applyPassengerLocationUpdate(rideId, payload);
+      return;
+    }
+    if (event.name == 'rideArrivalUpdated' ||
+        event.name == 'rideCancellationUpdated' ||
+        event.name == 'cashApprovalUpdated') {
+      unawaited(refreshRide(rideId).catchError((Object _) {}));
       return;
     }
 
@@ -241,6 +277,10 @@ class DriverController extends GetxController {
       if (rideStatus != null && index >= 0) {
         final updatedRide = Map<String, Object?>.from(rides[index]);
         updatedRide['status'] = rideStatus;
+        if (payload.containsKey('passengerBoardedAtUtc')) {
+          updatedRide['passengerBoardedAtUtc'] =
+              payload['passengerBoardedAtUtc'];
+        }
         if (payload.containsKey('customerPaymentEnabled')) {
           updatedRide['customerPaymentEnabled'] =
               payload['customerPaymentEnabled'] == true;
@@ -381,30 +421,37 @@ class DriverController extends GetxController {
     }
   }
 
-  Future<void> requestCancellation(Map<String, Object?> ride) async {
+  Future<void> requestCancellation(Map<String, Object?> ride,
+      {String? initialReason}) async {
     final id = int.tryParse('${ride['id']}');
     if (id == null || cancellationRequestsInFlight.contains(id)) return;
-    final reason = TextEditingController();
+    final reason = TextEditingController(text: initialReason);
     final submitted = await Get.dialog<String>(AlertDialog(
-      title: const Text('إلغاء الرحلة'),
+      title: Text(operationalText('إلغاء الرحلة', 'Cancel ride')),
       content: Column(mainAxisSize: MainAxisSize.min, children: [
         Text('${ride['status']}' == '5'
-            ? 'يُرسل الطلب إلى الراكب، وتستمر الرحلة حتى موافقته.'
-            : 'سيتم إلغاء الرحلة قبل بدءها.'),
+            ? operationalText(
+                'اطلب التوقف في مكان آمن أولاً. الإرسال يؤكد أن النقل توقف فعلياً؛ تُراجع المسؤولية والمبالغ بشكل مستقل.',
+                'Stop in a safe location first. Sending confirms transport has physically ended; responsibility and money are reviewed separately.')
+            : operationalText('سيتم إلغاء الرحلة قبل بدءها.',
+                'The ride will be cancelled before starting.')),
         TextField(
             controller: reason,
             maxLength: 1000,
-            decoration: const InputDecoration(labelText: 'سبب الإلغاء')),
+            decoration: InputDecoration(
+                labelText:
+                    operationalText('سبب الإلغاء', 'Cancellation reason'))),
       ]),
       actions: [
         TextButton(
-            onPressed: () => Get.back<String>(), child: const Text('رجوع')),
+            onPressed: () => Get.back<String>(),
+            child: Text(operationalText('رجوع', 'Back'))),
         FilledButton(
             onPressed: () {
               if (reason.text.trim().length >= 3)
                 Get.back(result: reason.text.trim());
             },
-            child: const Text('إرسال')),
+            child: Text(operationalText('إرسال', 'Submit'))),
       ],
     ));
     unawaited(Future<void>.delayed(
@@ -413,15 +460,23 @@ class DriverController extends GetxController {
     if (submitted == null) return;
     cancellationRequestsInFlight.add(id);
     try {
-      final result = await _repository.requestRideCancellation(id, submitted);
+      final result = await _repository.requestRideCancellation(id, submitted,
+          safeStopConfirmed: '${ride['status']}' == '5');
       Get.snackbar(
-          'تم تسجيل الطلب',
+          operationalText('تم تسجيل الطلب', 'Request recorded'),
           '${result['rideStatus']}' == '7'
-              ? 'أُلغيت الرحلة وأصبحت متاحاً.'
-              : 'بانتظار موافقة الراكب. تستمر الرحلة حالياً.');
+              ? operationalText(
+                  'أُلغي النقل. يبقى استقبال الطلبات مرتبطاً باختيارك وأهليتك لدى الشركة.',
+                  'Transport cancelled. Your request availability remains under your control and company eligibility.')
+              : operationalText(
+                  'انتهى الالتزام بالنقل. تُراجع المسؤولية والمبالغ في متابعة الرحلة.',
+                  'Transport ended. Review responsibility and money in ride follow-up.'));
       await load(showLoading: false);
     } on Object {
-      Get.snackbar('تعذر إلغاء الرحلة', 'تحقق من حالة الرحلة ثم أعد المحاولة.');
+      Get.snackbar(
+          operationalText('تعذر إلغاء الرحلة', 'Could not cancel ride'),
+          operationalText('تحقق من حالة الرحلة ثم أعد المحاولة.',
+              'Check the confirmed ride state and try again.'));
     } finally {
       cancellationRequestsInFlight.remove(id);
     }
@@ -461,7 +516,11 @@ class DriverController extends GetxController {
   }
 
   Future<void> load({bool showLoading = true}) async {
-    if (_refreshInFlight) return;
+    if (isClosed) return;
+    if (_refreshInFlight) {
+      _refreshQueued = true;
+      return;
+    }
     _refreshInFlight = true;
     // A fresh reconnect snapshot supersedes earlier invitation verification.
     _requestSnapshotVersion++;
@@ -472,6 +531,7 @@ class DriverController extends GetxController {
     final versionsAtStart = Map<int, int>.of(_rideSnapshotVersions);
     try {
       final snapshot = await _repository.load(_session.currentUserId.value);
+      if (isClosed) return;
       profile.value = snapshot.profile;
       final previousRides = {
         for (final ride in rides) '${ride['id']}': ride,
@@ -513,7 +573,7 @@ class DriverController extends GetxController {
           Get.find<TrackingHubService>().setRideSubscriptions(activeRideIds),
         );
       }
-      notifications.assignAll(await _repository.notifications());
+      await _refreshNotifications(announceRequests: true);
     } catch (exception) {
       // A transient polling failure must not hide the last usable snapshot.
       if (showLoading || rides.isEmpty) error.value = exception.toString();
@@ -526,6 +586,10 @@ class DriverController extends GetxController {
         for (final event in queued) {
           _handleHubEvent(event);
         }
+      }
+      if (_refreshQueued && !isClosed) {
+        _refreshQueued = false;
+        unawaited(load(showLoading: false));
       }
     }
   }
@@ -591,22 +655,43 @@ class DriverController extends GetxController {
     }
   }
 
+  final Set<int> _statusUpdatesInFlight = {};
   Future<void> updateStatus(
       Map<String, Object?> ride, int status, String label) async {
     final id = int.tryParse('${ride['id']}');
-    if (id == null) return;
-    final payment = DriverRidePaymentState(ride);
-    if (status == 5 && payment.startBlocked) {
-      Get.snackbar('بانتظار الدفع', payment.message!);
-      return;
-    }
-    if (status == 6 && !payment.completed) {
-      Get.snackbar('بانتظار الدفع',
-          '${payment.collectionMessage} لا يمكن إنهاء الرحلة قبل السداد.');
-      return;
-    }
+    if (id == null || !_statusUpdatesInFlight.add(id)) return;
     try {
-      await _repository.updateRideStatus(rideId: id, status: status);
+      final payment = DriverRidePaymentState(ride);
+      if (status == 5 && payment.startBlocked) {
+        Get.snackbar('بانتظار الدفع', payment.message!);
+        return;
+      }
+      if (status == 6) {
+        await finishTransport(ride);
+        return;
+      }
+      bool confirmPassengerBoarding = false;
+      if (status == 5 && ride['passengerBoardedAtUtc'] == null) {
+        final confirmed = await Get.dialog<bool>(AlertDialog(
+          title: const Text('تأكيد صعود الراكب'),
+          content: const Text(
+              'لم يؤكد الراكب الصعود من تطبيقه. هل صعد فعلياً إلى السيارة وتريد بدء الرحلة الآن؟'),
+          actions: [
+            TextButton(
+                onPressed: () => Get.back(result: false),
+                child: const Text('لم يصعد بعد')),
+            FilledButton(
+                onPressed: () => Get.back(result: true),
+                child: const Text('صعد الراكب، ابدأ الرحلة')),
+          ],
+        ));
+        if (confirmed != true) return;
+        confirmPassengerBoarding = true;
+      }
+      await _repository.updateRideStatus(
+          rideId: id,
+          status: status,
+          confirmPassengerBoarding: confirmPassengerBoarding);
       Get.snackbar('تم التحديث', 'أصبحت الحالة: $label');
       await load();
     } catch (exception) {
@@ -616,6 +701,69 @@ class DriverController extends GetxController {
               : exception.title)
           : exception.toString();
       Get.snackbar('تعذر التحديث', message);
+    } finally {
+      _statusUpdatesInFlight.remove(id);
+    }
+  }
+
+  final changingReadiness = false.obs;
+  Future<void> changeReadiness(bool enabled) async {
+    if (changingReadiness.value) return;
+    changingReadiness.value = true;
+    try {
+      final result = await Get.find<ApiClient>().execute<Object?>(
+          model: 'DriverReadinessModel',
+          operation: 'update',
+          data: {'acceptsNewRequests': enabled});
+      if (result is ApiFailure) throw result.problem;
+      await load(showLoading: false);
+    } catch (error) {
+      Get.snackbar('تعذر تغيير التوفر', '$error');
+    } finally {
+      changingReadiness.value = false;
+    }
+  }
+
+  Future<void> openFinancialFollowUp(Map<String, Object?> ride) async {
+    final id = int.tryParse('${ride['id']}');
+    if (id != null)
+      await Get.to<void>(
+          () => RideFinancialFollowUp(rideId: id, isDriver: true));
+    await load(showLoading: false);
+  }
+
+  Future<void> finishTransport(Map<String, Object?> ride) async {
+    final id = int.tryParse('${ride['id']}');
+    if (id == null) return;
+    final approved = await Get.dialog<bool>(AlertDialog(
+      title: Text(operationalText('إنهاء خدمة النقل', 'End transport service')),
+      content: Text(operationalText(
+          'أكد وصول الراكب أو انتهاء النقل فعلياً عند نقطة آمنة. يبقى أي مبلغ غير مدفوع أو استرداد للمراجعة، ولا يُسجل المال مقبوضاً.',
+          'Confirm arrival or physical termination at a safe location. Unpaid balances and refunds remain separate; no receipt is fabricated.')),
+      actions: [
+        TextButton(
+            onPressed: () => Get.back(result: false),
+            child: Text(operationalText('رجوع', 'Back'))),
+        FilledButton(
+            onPressed: () => Get.back(result: true),
+            child: Text(operationalText('انتهى النقل عند نقطة آمنة',
+                'Transport ended at a safe location')))
+      ],
+    ));
+    if (approved != true) return;
+    try {
+      final result = await Get.find<ApiClient>().execute<Object?>(
+          model: 'RideServiceModel',
+          operation: 'finish',
+          data: {
+            'rideId': id,
+            'reason': 'أكد السائق انتهاء النقل عند نقطة آمنة'
+          });
+      if (result is ApiFailure) throw result.problem;
+      await load(showLoading: false);
+      await openFinancialFollowUp(ride);
+    } catch (error) {
+      Get.snackbar('تعذر تأكيد الإنهاء', '$error');
     }
   }
 
@@ -664,9 +812,12 @@ class DriverController extends GetxController {
 
   Future<void> _refreshNotifications({bool announceRequests = false}) async {
     try {
-      notifications.assignAll(await _repository.notifications());
+      final latest = await _repository.notifications();
+      if (isClosed) return;
+      notifications.assignAll(latest);
       if (announceRequests && Get.isRegistered<PushNotificationsService>()) {
         for (final item in notifications) {
+          if (item['isRead'] == true) continue;
           await Get.find<PushNotificationsService>()
               .showRideRequestNotification(item);
         }
@@ -732,22 +883,32 @@ class DriverController extends GetxController {
     await load(showLoading: false);
   }
 
-  Future<void> loadWallet() async {
-    if (isWalletLoading.value) return;
+  bool _walletRefreshRequested = false;
+  Future<void> loadWallet({bool quiet = false}) async {
+    if (isWalletLoading.value) {
+      _walletRefreshRequested = true;
+      return;
+    }
     isWalletLoading.value = true;
     try {
-      final wallet = await _repository.getWallet();
-      walletBalance.value = _number(wallet['balance']);
-      final items = wallet['transactions'];
-      walletTransactions.assignAll(items is List
-          ? items
-              .whereType<Map<Object?, Object?>>()
-              .map((item) => Map<String, Object?>.from(item))
-              .toList()
-          : const <Map<String, Object?>>[]);
-      isWalletLoaded.value = true;
+      do {
+        _walletRefreshRequested = false;
+        final wallet = await _repository.getWallet();
+        if (isClosed) return;
+        walletBalance.value = _number(wallet['balance']);
+        walletLedgerDebt.value = _number(wallet['ledgerDebt']);
+        final items = wallet['transactions'];
+        walletTransactions.assignAll(items is List
+            ? items
+                .whereType<Map<Object?, Object?>>()
+                .map((item) => Map<String, Object?>.from(item))
+                .toList()
+            : const <Map<String, Object?>>[]);
+        isWalletLoaded.value = true;
+      } while (_walletRefreshRequested);
     } catch (_) {
-      Get.snackbar('تعذر تحميل المحفظة', 'تحقق من الاتصال ثم أعد المحاولة.');
+      if (!quiet)
+        Get.snackbar('تعذر تحميل المحفظة', 'تحقق من الاتصال ثم أعد المحاولة.');
     } finally {
       isWalletLoading.value = false;
     }
@@ -835,96 +996,33 @@ class DriverController extends GetxController {
   }
 
   Future<void> updateLocation() async {
-    final ready = await _ensureLocationAccess(showMessage: true);
-    if (!ready) return;
-    try {
-      final position = await Geolocator.getCurrentPosition(
-        locationSettings: const LocationSettings(
-          accuracy: LocationAccuracy.high,
-        ),
-      );
-      await _publishLocation(position, showMessage: true, force: true);
-    } catch (exception) {
-      Get.snackbar('تعذر تحديث الموقع', 'تعذر قراءة موقع الجهاز الحالي.');
-    }
+    await _locationTracker?.refresh(prompt: true);
   }
 
-  Future<void> _startRealLocationUpdates() async {
-    final ready = await _ensureLocationAccess();
-    if (!ready) return;
-    try {
-      final current = await Geolocator.getCurrentPosition(
-        locationSettings: const LocationSettings(
-          accuracy: LocationAccuracy.high,
-        ),
-      );
-      await _publishLocation(current);
-      await _locationSubscription?.cancel();
-      _locationSubscription = Geolocator.getPositionStream(
-        locationSettings: _driverLocationStreamSettings(),
-      ).listen(
-        (position) => unawaited(_publishLocation(position)),
-        onError: (_) {},
-      );
-    } catch (_) {
-      // The driver can still retry explicitly with the location button.
+  Future<void> _showLocationAccessPrompt(DriverLocationStatus status) async {
+    if (isClosed || Get.key.currentState == null) return;
+    final disabled = status == DriverLocationStatus.serviceDisabled;
+    final openSettings = await Get.dialog<bool>(AlertDialog(
+      title: Text(disabled ? 'تفعيل موقع الجهاز' : 'صلاحية الموقع مطلوبة'),
+      content: Text(disabled
+          ? 'فعّل GPS ليحدث موقعك تلقائياً ويتمكن الراكب من تتبعك.'
+          : 'امنح تطبيق السائق صلاحية الموقع من إعدادات التطبيق لبدء التتبع التلقائي.'),
+      actions: [
+        TextButton(
+            onPressed: () => Get.back(result: false),
+            child: const Text('لاحقاً')),
+        FilledButton(
+            onPressed: () => Get.back(result: true),
+            child: Text(disabled ? 'تفعيل الموقع' : 'فتح الإعدادات')),
+      ],
+    ));
+    if (openSettings != true || isClosed) return;
+    if (disabled) {
+      await Geolocator.openLocationSettings();
+    } else {
+      await Geolocator.openAppSettings();
     }
-  }
-
-  LocationSettings _driverLocationStreamSettings() {
-    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
-      return AndroidSettings(
-        accuracy: LocationAccuracy.bestForNavigation,
-        // Waiting requires fresh GPS fixes even while the car is stationary.
-        distanceFilter: 0,
-        intervalDuration: const Duration(seconds: 3),
-        foregroundNotificationConfig: const ForegroundNotificationConfig(
-          notificationTitle: 'سائق يمن درايف يتتبع موقعك',
-          notificationText: 'يستمر تحديث موقعك لإظهاره للركاب أثناء العمل.',
-          notificationChannelName: 'تتبع موقع السائق',
-          notificationIcon: AndroidResource(name: 'ic_stat_yemendrive'),
-          setOngoing: true,
-        ),
-      );
-    }
-
-    return const LocationSettings(
-      accuracy: LocationAccuracy.bestForNavigation,
-      distanceFilter: 0,
-    );
-  }
-
-  Future<bool> _ensureLocationAccess({bool showMessage = false}) async {
-    if (!await Geolocator.isLocationServiceEnabled()) {
-      if (showMessage) {
-        Get.snackbar('الموقع غير مفعل', 'فعّل خدمة الموقع في الجهاز أولًا.');
-      }
-      return false;
-    }
-    var permission = await Geolocator.checkPermission();
-    if (permission == LocationPermission.denied) {
-      permission = await Geolocator.requestPermission();
-    }
-    if (permission == LocationPermission.denied ||
-        permission == LocationPermission.deniedForever) {
-      if (showMessage) {
-        Get.snackbar('صلاحية الموقع مطلوبة',
-            'امنح تطبيق السائق صلاحية الموقع لتحديث موقعك الحقيقي.');
-      } else {
-        _showDriverLocationPermissionNotice(permission);
-      }
-      return false;
-    }
-    return true;
-  }
-
-  void _showDriverLocationPermissionNotice(LocationPermission permission) {
-    if (_locationPermissionNoticeShown || isClosed) return;
-    _locationPermissionNoticeShown = true;
-    final message = permission == LocationPermission.deniedForever
-        ? 'لن يتم إرسال موقعك لأن صلاحية الموقع غير متاحة.'
-        : 'لم تُمنح صلاحية الموقع، لذلك لن يتم إرسال موقعك للركاب.';
-    Get.snackbar('تتبع الموقع غير مفعل', message);
+    unawaited(_locationTracker?.refresh() ?? Future<void>.value());
   }
 
   Future<void> _publishLocation(
@@ -932,6 +1030,7 @@ class DriverController extends GetxController {
     bool showMessage = false,
     bool force = false,
   }) async {
+    if (isClosed || !_session.isAuthenticated.value) return;
     currentPosition.value = position;
     final driverId = _session.currentUserId.value;
     if (driverId == null || _locationUpdateInFlight) return;
@@ -988,6 +1087,7 @@ class DriverController extends GetxController {
       });
       if (!sent) return;
       _lastLocationSentAt = DateTime.now();
+      if (!isClosed) lastLocationSentAt.value = _lastLocationSentAt;
       _lastSentPosition = position;
       if (showMessage) {
         Get.snackbar('تم تحديث الموقع', 'تم إرسال موقعك الحقيقي الحالي.');
@@ -1143,7 +1243,8 @@ class DriverController extends GetxController {
     }
   }
 
-  Future<void> chooseCancellationRefund(int requestId, int method, int revision) async {
+  Future<void> chooseCancellationRefund(
+      int requestId, int method, int revision) async {
     await _repository.chooseCancellationRefund(requestId, method, revision);
     await load(showLoading: false);
   }
@@ -1178,12 +1279,14 @@ class DriverController extends GetxController {
         rides.where((item) => '${item['id']}' == '$rideId').firstOrNull;
     if (ride == null) return true;
     final status = int.tryParse('${ride['status']}');
-    return status == 8;
+    return status == 8 || status == 7;
   }
 
   @override
   void onClose() {
-    _locationSubscription?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
+    _automaticSyncTimer?.cancel();
+    unawaited(_locationTracker?.stop() ?? Future<void>.value());
     _hubEventSubscription?.cancel();
     _hubConnectionSubscription?.cancel();
     passengerLocationsByRideId.clear();

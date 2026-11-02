@@ -5,28 +5,40 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 import '../network/api_client.dart';
 import '../network/api_models.dart';
+import '../utils/utc_timestamp.dart';
 
 /// Shared by foreground Hub/FCM delivery and the background FCM isolate.
 Future<void> showVerifiedRideRequestAlert(
     ApiClient client, Map<String, dynamic> payload,
-    {FlutterLocalNotificationsPlugin? notifications}) {
-  final task = _alertQueue.then((_) => _show(client, payload, notifications));
+    {FlutterLocalNotificationsPlugin? notifications, int? userId}) {
+  final task =
+      _alertQueue.then((_) => _show(client, payload, notifications, userId));
   _alertQueue = task.catchError((Object _) {});
   return task;
 }
 
 Future<void> _alertQueue = Future<void>.value();
 
-Future<void> _show(ApiClient client, Map<String, dynamic> payload,
-    FlutterLocalNotificationsPlugin? notifications) async {
-  if (payload['action'] != 'open_ride_offer') return;
+bool isFreshRideRequestAlert(Map<String, dynamic> payload, {DateTime? now}) {
+  if (payload['action'] != 'open_ride_offer') return false;
   final id = int.tryParse('${payload['notificationId']}');
   final rideId = int.tryParse('${payload['rideId']}');
-  final created = DateTime.tryParse('${payload['createdAtUtc']}')?.toUtc();
-  if (id == null ||
-      rideId == null ||
-      created == null ||
-      DateTime.now().toUtc().difference(created).inSeconds > 60) return;
+  final created = parseUtcTimestamp(payload['createdAtUtc']);
+  if (id == null || id <= 0 || rideId == null || rideId <= 0 || created == null)
+    return false;
+  final age = (now ?? DateTime.now()).toUtc().difference(created);
+  return age <= const Duration(seconds: 60) &&
+      age >= const Duration(seconds: -5);
+}
+
+Future<void> _show(
+    ApiClient client,
+    Map<String, dynamic> payload,
+    FlutterLocalNotificationsPlugin? notifications,
+    int? authenticatedUserId) async {
+  if (!isFreshRideRequestAlert(payload)) return;
+  final id = int.parse('${payload['notificationId']}');
+  final rideId = int.parse('${payload['rideId']}');
   try {
     final result = await client.execute<Object?>(
         model: 'RideRequestAvailabilityModel',
@@ -36,7 +48,9 @@ Future<void> _show(ApiClient client, Map<String, dynamic> payload,
         result.data is! Map ||
         (result.data as Map)['available'] != true) return;
     const storage = FlutterSecureStorage();
-    final userId = await storage.read(key: 'authenticated_user_id');
+    final userId = authenticatedUserId ??
+        int.tryParse(await storage.read(key: 'authenticated_user_id') ?? '');
+    if (userId == null) return;
     final key = 'driver_request_alerts_$userId';
     final seen = (await storage.read(key: key) ?? '')
         .split(',')
@@ -46,7 +60,6 @@ Future<void> _show(ApiClient client, Map<String, dynamic> payload,
     while (seen.length > 200) {
       seen.remove(seen.first);
     }
-    await storage.write(key: key, value: seen.join(','));
     final plugin = notifications ?? FlutterLocalNotificationsPlugin();
     if (notifications == null) {
       await plugin.initialize(
@@ -59,12 +72,15 @@ Future<void> _show(ApiClient client, Map<String, dynamic> payload,
         body: '${payload['body'] ?? 'يوجد طلب رحلة متاح بالقرب منك.'}',
         notificationDetails: const NotificationDetails(
             android: AndroidNotificationDetails(
-                'yemendrive_alerts', 'إشعارات يمن درايف',
+                'yemendrive_ride_requests_v2', 'طلبات الرحلات الجديدة',
+                channelDescription: 'تنبيه صوتي عند وصول طلب رحلة متاح',
                 importance: Importance.high,
                 priority: Priority.high,
                 playSound: true,
+                enableVibration: true,
                 icon: 'ic_stat_yemendrive')),
         payload: jsonEncode(payload));
+    await storage.write(key: key, value: seen.join(','));
   } on Object {
     // Offline, expired-session and verification failures never produce an alert.
   }

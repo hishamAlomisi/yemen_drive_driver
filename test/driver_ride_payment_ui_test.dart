@@ -19,6 +19,8 @@ const _ride = <String, Object?>{
   'id': 7,
   'driverId': 42,
   'status': 9,
+  'paymentMethodCode': 'cash',
+  'passengerBoardedAtUtc': '2026-11-01T10:00:00Z',
   'customerPrice': 1000,
   'totalAmount': 1100,
   'pickupDisplayName': 'حدة',
@@ -29,6 +31,16 @@ class _Repository implements DriverRepository {
   Map<String, Object?> latest = {..._ride};
   int detailReads = 0;
   Completer<Map<String, Object?>>? nextDetail;
+  final starts = <bool>[];
+
+  @override
+  Future<void> updateRideStatus(
+      {required int rideId,
+      required int status,
+      bool? customerPaymentEnabled,
+      bool confirmPassengerBoarding = false}) async {
+    starts.add(confirmPassengerBoarding);
+  }
 
   @override
   Future<Map<String, Object?>> getRide(int rideId) async {
@@ -88,6 +100,14 @@ class _Driver extends DriverController {
   }
 }
 
+class _BoardingDriver extends DriverController {
+  _BoardingDriver(super.repository, super.session);
+  @override
+  void onReady() {}
+  @override
+  Future<void> load({bool showLoading = true}) async {}
+}
+
 class _Hub extends TrackingHubService {
   _Hub() : super(SecureStorageService());
   final messages = StreamController<TrackingHubEvent>.broadcast();
@@ -129,11 +149,69 @@ Future<void> _mount(WidgetTester tester, Map<String, Object?> ride) async {
 
 void main() {
   tearDown(() => Get.reset());
-  testWidgets('finish stays disabled until server confirms payment',
+  testWidgets('driver can decline or confirm boarding without duplicate starts',
+      (tester) async {
+    final repository = _Repository();
+    final subject =
+        Get.put<DriverController>(_BoardingDriver(repository, _session()));
+    await tester.pumpWidget(const GetMaterialApp(home: Scaffold()));
+    final unboarded = {..._ride, 'passengerBoardedAtUtc': null};
+    final declined = subject.updateStatus(unboarded, 5, 'بدأت الرحلة');
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('لم يصعد بعد'));
+    await tester.pumpAndSettle();
+    await declined;
+    expect(repository.starts, isEmpty);
+    final confirmed = subject.updateStatus(unboarded, 5, 'بدأت الرحلة');
+    await tester.pumpAndSettle();
+    await subject.updateStatus(unboarded, 5, 'بدأت الرحلة');
+    expect(find.text('تأكيد صعود الراكب'), findsOneWidget);
+    await tester.tap(find.text('صعد الراكب، ابدأ الرحلة'));
+    await tester.pumpAndSettle();
+    await confirmed;
+    expect(repository.starts, [true]);
+    await tester.pump(const Duration(seconds: 4));
+    await tester.pumpAndSettle();
+    await subject.updateStatus(_ride, 5, 'بدأت الرحلة');
+    await tester.pumpAndSettle();
+    expect(repository.starts, [true, false]);
+    await tester.pump(const Duration(seconds: 4));
+    await tester.pumpAndSettle();
+    await tester.pumpWidget(const SizedBox());
+  });
+  testWidgets(
+      'paid ride offers driver boarding confirmation and hides alerts after boarding',
+      (tester) async {
+    await _mount(tester, {
+      ..._ride,
+      'passengerBoardedAtUtc': null,
+      'paymentMethodCode': 'wallet',
+      'paymentCompleted': true
+    });
+    expect(_button(tester, 'بدء الرحلة').onPressed, isNotNull);
+    expect(find.byTooltip('تنبيه الراكب'), findsOneWidget);
+    expect(find.byTooltip('نتيجة التواصل'), findsOneWidget);
+    expect(find.byTooltip('محادثة العميل'), findsOneWidget);
+    expect(find.byTooltip('اتصال بالعميل'), findsOneWidget);
+    expect(find.text('محادثة العميل'), findsNothing);
+    expect(find.text('اتصال بالعميل'), findsNothing);
+    expect(find.text('تنبيه الراكب'), findsNothing);
+    await tester.longPress(find.byTooltip('تنبيه الراكب'));
+    await tester.pumpAndSettle();
+    expect(find.text('تنبيه الراكب'), findsOneWidget);
+    await tester.pump(const Duration(seconds: 2));
+    await _mount(tester, _ride);
+    expect(find.byTooltip('تنبيه الراكب'), findsNothing);
+    expect(find.byTooltip('نتيجة التواصل'), findsNothing);
+    expect(find.byTooltip('محادثة العميل'), findsOneWidget);
+    expect(find.byTooltip('اتصال بالعميل'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+  });
+  testWidgets('physical service can finish before financial settlement',
       (tester) async {
     await _mount(
         tester, {..._ride, 'status': 5, 'paymentMethodCode': 'wallet'});
-    expect(_button(tester, 'إنهاء الرحلة').onPressed, isNull);
+    expect(_button(tester, 'إنهاء الرحلة').onPressed, isNotNull);
     expect(find.textContaining('محفظة يمن درايف'), findsOneWidget);
     await _mount(tester, {
       ..._ride,
@@ -161,10 +239,10 @@ void main() {
         });
         expect(find.text('تم الدفع عبر $method'), findsOneWidget);
         expect(find.text('تحصيل الدفع'), findsNothing);
-        expect(find.text('تمكين طرق الدفع للعميل'), findsNothing);
+        expect(find.text('تمكين الدفع'), findsNothing);
         final action = switch (status) {
           3 => 'بدء التوجه',
-          4 => 'تأكيد الوصول إلى الراكب',
+          4 => 'تأكيد الوصول',
           9 => 'بدء الرحلة',
           _ => 'إنهاء الرحلة',
         };
@@ -207,11 +285,11 @@ void main() {
       'walletPaymentPending': true,
     });
     expect(_button(tester, 'تحصيل الدفع').onPressed, isNull);
-    expect(_button(tester, 'تمكين طرق الدفع للعميل').onPressed, isNull);
+    expect(_button(tester, 'تمكين الدفع').onPressed, isNull);
     expect(find.textContaining('تم الدفع عبر'), findsNothing);
     await _mount(tester, {..._ride, 'status': 5, 'paymentMethodCode': 'Cash'});
     expect(_button(tester, 'تحصيل الدفع').onPressed, isNotNull);
-    expect(_button(tester, 'تمكين طرق الدفع للعميل').onPressed, isNotNull);
+    expect(_button(tester, 'تمكين الدفع').onPressed, isNotNull);
     await tester.pumpWidget(const SizedBox());
   });
 
@@ -271,6 +349,8 @@ void main() {
       expect(_button(tester, 'بدء الرحلة').onPressed, isNotNull);
       Get.closeAllSnackbars();
       await tester.pumpAndSettle();
+      Get.delete<DriverController>();
+      await tester.pump();
       await tester.pumpWidget(const SizedBox());
       await hub.messages.close();
     });

@@ -1,466 +1,303 @@
 import 'dart:async';
-
 import 'package:flutter/material.dart';
-
 import '../../../core/network/api_models.dart';
 import '../../../core/realtime/tracking_hub_service.dart';
+import '../../../shared/widgets/ride_financial_follow_up.dart';
 import '../models/driver_ride_payment_state.dart';
 import '../repositories/driver_repository.dart';
-import '../widgets/driver_design.dart';
 
 class DriverPaymentView extends StatefulWidget {
-  const DriverPaymentView({
-    required this.ride,
-    required this.repository,
-    required this.hub,
-    super.key,
-  });
+  const DriverPaymentView(
+      {required this.ride,
+      required this.repository,
+      required this.hub,
+      super.key});
   final Map<String, Object?> ride;
   final DriverRepository repository;
   final TrackingHubService hub;
-
   @override
   State<DriverPaymentView> createState() => _DriverPaymentViewState();
 }
 
 class _DriverPaymentViewState extends State<DriverPaymentView>
     with WidgetsBindingObserver {
-  late final TextEditingController _cash;
   late Map<String, Object?> _ride;
-  bool _refreshingFare = false;
-  bool _fareRefreshRequested = false;
-  String? _fareError;
-  bool _saving = false;
-  int? _approvalId;
-  int? _approvalStatus;
-  bool _approvalRefreshInFlight = false;
-  bool _approvalRefreshRequested = false;
-  StreamSubscription<TrackingHubEvent>? _hubEventSubscription;
-  StreamSubscription<void>? _hubConnectionSubscription;
+  late final TextEditingController _cash;
+  bool _busy = false;
+  bool _refreshing = false;
+  bool _refreshQueued = false;
+  bool _confirming = false;
+  String? _error;
+  StreamSubscription<TrackingHubEvent>? _events;
+  StreamSubscription<void>? _connections;
+  Timer? _timer;
+  double _number(Object? value) =>
+      value is num ? value.toDouble() : double.tryParse('$value') ?? 0;
+  Map get _finance => _ride['finance'] is Map ? _ride['finance'] as Map : {};
+  double get _due => _number(_finance['amountDue'] ?? _ride['totalAmount']);
+  double get _outstanding =>
+      _number(_finance['outstandingAmount'] ?? _ride['outstandingAmount']);
+  double get _received => double.tryParse(_cash.text.trim()) ?? 0;
+  double get _excess => (_received - _outstanding).clamp(0, double.infinity);
+  DriverRidePaymentState get _state => DriverRidePaymentState(_ride);
+  bool get _blocked =>
+      _state.completed ||
+      _state.pending ||
+      !_state.cashSelected ||
+      _ride['waitingIsOpen'] == true ||
+      _finance['amountUnderReview'] == true;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _ride = Map<String, Object?>.from(widget.ride);
-    _cash = TextEditingController(text: _totalDue.toStringAsFixed(0));
-    _cash.addListener(_onCashChanged);
-    _hubEventSubscription = widget.hub.events.listen(_handleHubEvent);
-    _hubConnectionSubscription = widget.hub.connectionRestored.listen((_) {
-      unawaited(_refreshApproval());
-      unawaited(_refreshFare());
+    _cash = TextEditingController(text: _outstanding.toStringAsFixed(0))
+      ..addListener(_cashChanged);
+    _events = widget.hub.events.listen((event) {
+      if ('${event.payload['rideId'] ?? event.payload['id']}' ==
+          '${_ride['id']}') unawaited(_refresh());
     });
-    unawaited(_refreshFare());
+    _connections = widget.hub.connectionRestored.listen((_) => _refresh());
+    _timer = Timer.periodic(const Duration(seconds: 15), (_) {
+      if (!_busy) unawaited(_refresh());
+    });
+    unawaited(_refresh());
   }
 
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) unawaited(_refreshFare());
-  }
-
-  double get _fare => _number(_ride['customerPrice']);
-  double get _serviceFee => _number(_ride['serviceFee']);
-  double get _waitingFee => _number(_ride['waitingFee']);
-  double get _routeChangeFees => _number(_ride['routeChangeFees']);
-  double get _totalDue {
-    final stored = _number(_ride['totalAmount']);
-    return stored > 0 ? stored : _fare + _serviceFee + _waitingFee;
-  }
-
-  double get _commission => _number(_ride['driverCommissionAmount']);
-  double get _platformReceivable {
-    final stored = _number(_ride['platformShare']);
-    return stored > 0 ? stored : _serviceFee + _commission;
-  }
-
-  double get _driverNet => _number(_ride['driverShare']) > 0
-      ? _number(_ride['driverShare'])
-      : _fare + _waitingFee - _commission;
-  double get _cashReceived => double.tryParse(_cash.text.trim()) ?? _totalDue;
-  double get _customerWalletExcess =>
-      (_cashReceived - _totalDue).clamp(0, double.infinity);
-  double get _expectedDriverDebt => _platformReceivable + _customerWalletExcess;
-  double _number(Object? value) =>
-      value is num ? value.toDouble() : double.tryParse('${value ?? ''}') ?? 0;
-  bool get _waitingIsOpen => _ride['waitingIsOpen'] == true;
-  bool get _paymentCompleted => _ride['paymentCompleted'] == true;
-  bool get _walletPaymentPending => _ride['walletPaymentPending'] == true;
-  bool get _cashSelected => DriverRidePaymentState(_ride).cashSelected;
-  bool get _collectionBlocked =>
-      _paymentCompleted || _walletPaymentPending || !_cashSelected;
-  String get _paymentStateMessage => _paymentCompleted
-      ? '${DriverRidePaymentState(_ride).paidMessage}. لا يمكن تحصيله مرة أخرى.'
-      : DriverRidePaymentState(_ride).collectionMessage;
-
-  Future<bool> _refreshFare() async {
-    if (!mounted) return false;
-    if (_refreshingFare) {
-      _fareRefreshRequested = true;
-      return false;
-    }
-    final rideId = int.tryParse('${_ride['id']}');
-    if (rideId == null) return false;
-    setState(() => _refreshingFare = true);
-    var unchanged = true;
-    try {
-      // An electronic payment can settle while an older fare response is in
-      // flight. Reconcile every queued event before allowing cash collection.
-      do {
-        _fareRefreshRequested = false;
-        try {
-          final latest = await widget.repository.getRideForPayment(rideId);
-          if (!mounted) return false;
-          final previousTotal = _totalDue;
-          final previousWaiting = _waitingFee;
-          final previousRouteVersion = _ride['routeVersion'];
-          final usedSuggestedAmount =
-              _cash.text == previousTotal.toStringAsFixed(0);
-          setState(() {
-            _ride = latest;
-            _fareError = null;
-            if (usedSuggestedAmount) _cash.text = _totalDue.toStringAsFixed(0);
-          });
-          unchanged = unchanged &&
-              previousTotal == _totalDue &&
-              previousWaiting == _waitingFee &&
-              previousRouteVersion == _ride['routeVersion'];
-        } catch (_) {
-          unchanged = false;
-          if (mounted) {
-            setState(() {
-              _fareError = 'تعذر تأكيد الأجرة. أعد التحديث قبل تسجيل التحصيل.';
-            });
-          }
-        }
-      } while (_fareRefreshRequested && mounted);
-      return unchanged;
-    } finally {
-      if (mounted) setState(() => _refreshingFare = false);
-    }
-  }
-
-  void _onCashChanged() {
+  void _cashChanged() {
     if (mounted) setState(() {});
   }
 
   @override
-  void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
-    _hubEventSubscription?.cancel();
-    _hubConnectionSubscription?.cancel();
-    _cash.removeListener(_onCashChanged);
-    _cash.dispose();
-    super.dispose();
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) unawaited(_refresh());
+  }
+
+  Future<bool> _refresh() async {
+    if (_refreshing) {
+      _refreshQueued = true;
+      return false;
+    }
+    setState(() => _refreshing = true);
+    var unchanged = true;
+    try {
+      do {
+        _refreshQueued = false;
+        final old = _outstanding;
+        final oldVersion = _ride['routeVersion'];
+        final suggested = _cash.text == old.toStringAsFixed(0);
+        final latest = await widget.repository
+            .getRideForPayment(int.parse('${_ride['id']}'));
+        if (!mounted) return false;
+        setState(() {
+          _ride = latest;
+          _error = null;
+          if (suggested) _cash.text = _outstanding.toStringAsFixed(0);
+        });
+        unchanged = unchanged &&
+            old == _outstanding &&
+            oldVersion == _ride['routeVersion'];
+      } while (_refreshQueued && mounted);
+      return unchanged;
+    } catch (_) {
+      if (mounted)
+        setState(() => _error = operationalText(
+            'تعذر تأكيد الأجرة. أعد التحديث قبل تسجيل التحصيل.',
+            'Could not verify the fare. Refresh before recording cash.'));
+      return false;
+    } finally {
+      if (mounted) setState(() => _refreshing = false);
+    }
   }
 
   Future<void> _submit() async {
-    if (_saving || _refreshingFare) return;
-    final rideId = int.tryParse('${widget.ride['id']}');
+    if (_busy || _refreshing) return;
     final amount = num.tryParse(_cash.text.trim());
-    if (rideId == null || amount == null || !amount.isFinite || amount < 0) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('أدخل المبلغ النقدي الصحيح.')),
-      );
+    if (amount == null || !amount.isFinite || amount <= 0) {
+      setState(() => _error = operationalText(
+          'أدخل قيمة النقد الذي استلمته فعلياً.',
+          'Enter the cash you actually received.'));
       return;
     }
-    if (_approvalStatus == 0) return;
-    setState(() => _saving = true);
+    setState(() => _busy = true);
     try {
-      final unchanged = await _refreshFare();
-      if (!mounted || _fareError != null) return;
-      if (_collectionBlocked) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text(_paymentStateMessage)));
+      final unchanged = await _refresh();
+      if (!mounted || _error != null) return;
+      if (!unchanged || _blocked) {
+        setState(() => _error = operationalText(
+            'تغيرت حالة الدفع أو الأجرة. راجع الفاتورة الحالية قبل التحصيل.',
+            'The fare or payment changed. Review the current invoice before collecting.'));
         return;
       }
-      if (_waitingIsOpen) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-            content: Text('استأنف الرحلة وأوقف الانتظار قبل التحصيل.')));
-        return;
-      }
-      if (!unchanged) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-            content: Text(
-                'تم تحديث الرحلة أو الأجرة. راجع الوجهة والإجمالي ثم أعد تسجيل التحصيل.')));
-        return;
-      }
+      setState(() => _confirming = true);
+      final confirm = await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+                title: Text(operationalText(
+                    'تسجيل النقد المقبوض', 'Record cash received')),
+                content: Text(operationalText(
+                    'المقبوض فعلياً: $amount ر.ي.\nالمتبقي بعده: ${(_outstanding - amount).clamp(0, double.infinity).toStringAsFixed(0)} ر.ي.'
+                        '${_excess > 0 ? '\nالباقي للعميل: ${_excess.toStringAsFixed(0)} ر.ي. الأصل إعادته نقداً؛ المحفظة تتطلب اختياره.' : ''}\nيُسجل هذا القبض مرة واحدة. إنهاء النقل مستقل عن سداد المتبقي.',
+                    'Cash received: $amount YER.\nRemaining: ${(_outstanding - amount).clamp(0, double.infinity).toStringAsFixed(0)} YER.'
+                        '${_excess > 0 ? '\nRider change: ${_excess.toStringAsFixed(0)} YER. Return it physically; wallet credit requires their choice.' : ''}\nThis receipt is recorded once. Transport completion is independent of the balance.')),
+                actions: [
+                  TextButton(
+                      onPressed: () => Navigator.pop(context, false),
+                      child: Text(operationalText('رجوع', 'Back'))),
+                  FilledButton(
+                      onPressed: () => Navigator.pop(context, true),
+                      child: Text(operationalText(
+                          'استلمت النقد، سجله', 'Cash received; record it')))
+                ],
+              ));
+      if (!mounted) return;
+      setState(() => _confirming = false);
+      if (confirm != true) return;
       final result = await widget.repository.registerCashPayment(
-        rideId: rideId,
-        cashReceived: amount,
-      );
-      if (mounted) {
-        if (result['requiresCustomerApproval'] == true) {
-          _approvalId = int.tryParse('${result['approvalId']}');
-          _approvalStatus = 0;
-          unawaited(_refreshApproval());
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-              content: Text(
-                  'أُرسل طلب موافقة للعميل على خصم الفرق من محفظته. انتظر القرار ثم أعد تسجيل المبلغ نفسه.')));
-          return;
-        }
-        if (result['rejected'] == true) {
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-              content: Text(
-                  'رُفض التحصيل: رصيد محفظة العميل لا يكفي لتغطية الفرق.')));
-          return;
-        }
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-              content: Text(
-                  'تم تسجيل التحصيل النقدي. اضغط «إنهاء الرحلة» بعد التحقق من اكتمال العملية.')),
-        );
-        Navigator.of(context).pop();
-      }
+          rideId: int.parse('${_ride['id']}'), cashReceived: amount);
+      if (!mounted) return;
+      _cash.text = '';
+      await _refresh();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(
+              '${result['message'] ?? operationalText('سُجل النقد الفعلي.', 'Actual cash recorded.')}')));
     } catch (error) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-              content: Text(error is ApiProblemDetails
-                  ? error.detail ?? error.title
-                  : 'تعذر تسجيل الدفع: $error')),
-        );
-        unawaited(_refreshFare());
-      }
+      if (mounted)
+        setState(() => _error = error is ApiProblemDetails
+            ? error.detail ?? error.title
+            : '$error');
     } finally {
-      if (mounted) setState(() => _saving = false);
+      if (mounted)
+        setState(() {
+          _busy = false;
+          _confirming = false;
+        });
     }
   }
 
-  void _handleHubEvent(TrackingHubEvent event) {
-    if (event.name == 'rideStatusUpdated' || event.name == 'paymentUpdated') {
-      if ('${event.payload['rideId'] ?? event.payload['id']}' ==
-          '${_ride['id']}') {
-        unawaited(_refreshFare());
-      }
-      return;
-    }
-    if (event.name != 'cashApprovalUpdated') return;
-    final rideId = int.tryParse('${widget.ride['id']}');
-    final eventRideId = int.tryParse('${event.payload['rideId']}');
-    final approvalId = _approvalId;
-    final eventApprovalId =
-        int.tryParse('${event.payload['cashCollectionApprovalId']}');
-    if (rideId == null ||
-        eventRideId != rideId ||
-        approvalId == null ||
-        eventApprovalId != approvalId) {
-      return;
-    }
-    unawaited(_refreshApproval());
-  }
-
-  Future<void> _refreshApproval() async {
-    final approvalId = _approvalId;
-    if (approvalId == null || !mounted) return;
-    if (_approvalRefreshInFlight) {
-      _approvalRefreshRequested = true;
-      return;
-    }
-    _approvalRefreshInFlight = true;
-    try {
-      final approval =
-          await widget.repository.getCashCollectionApproval(approvalId);
-      final status = int.tryParse('${approval['status']}');
-      if (!mounted || status == null) return;
-      if (status != _approvalStatus) {
-        setState(() => _approvalStatus = status);
-        if (status != 0) {
-          final message = switch (status) {
-            1 => 'وافق العميل. أعد تسجيل المبلغ نفسه لإكمال التحصيل.',
-            2 => 'رفض العميل تغطية الفرق من محفظته. لم تسجل الدفعة.',
-            3 => 'لم يعد رصيد محفظة العميل كافياً. لم تسجل الدفعة.',
-            _ => 'تغيرت حالة طلب الموافقة. تحقق من إشعاراتك.',
-          };
-          ScaffoldMessenger.of(context)
-              .showSnackBar(SnackBar(content: Text(message)));
-        }
-      }
-    } catch (_) {
-      // Keep the pending state visible. The notification screen remains the
-      // fallback if the device temporarily loses connectivity.
-    } finally {
-      _approvalRefreshInFlight = false;
-      if (_approvalRefreshRequested && mounted) {
-        _approvalRefreshRequested = false;
-        unawaited(_refreshApproval());
-      }
-    }
-  }
-
-  String? get _approvalMessage => switch (_approvalStatus) {
-        0 => 'بانتظار موافقة العميل على خصم فرق الرحلة من محفظته…',
-        1 => 'وافق العميل. أعد تسجيل المبلغ نفسه لإكمال التحصيل.',
-        2 => 'رفض العميل تغطية الفرق؛ لن تسجل الدفعة.',
-        3 => 'رصيد محفظة العميل لم يعد كافياً؛ لن تسجل الدفعة.',
-        _ => null,
-      };
-
+  Widget _line(String title, Object? amount) => Padding(
+      padding: const EdgeInsets.symmetric(vertical: 5),
+      child: Row(children: [
+        Expanded(child: Text(title)),
+        Text('${_number(amount).toStringAsFixed(0)} ${operationalText('ر.ي', 'YER')}')
+      ]));
   @override
   Widget build(BuildContext context) => Scaffold(
-        appBar: AppBar(
-            title: Text(_paymentCompleted || !_cashSelected
-                ? 'حالة الدفع'
-                : 'تحصيل الدفع النقدي')),
-        body: Center(
-            child: ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 720),
-                child: ListView(
-                  padding: const EdgeInsets.all(20),
-                  children: [
-                    if (_paymentCompleted) ...[
-                      DriverHero(
-                        eyebrow: 'رحلة #${_ride['id']}',
-                        title: DriverRidePaymentState(_ride).paidMessage,
-                        subtitle:
-                            'المبلغ المدفوع: ${_totalDue.toStringAsFixed(0)} ر.ي',
-                        trailing: const Icon(Icons.check_circle_outline,
-                            color: copper),
-                      ),
-                      const SizedBox(height: 20),
-                      const Text(
-                          'اكتمل الدفع. يمكنك إنهاء الرحلة عند اكتمالها.'),
-                      const SizedBox(height: 16),
-                      OutlinedButton(
-                        onPressed: () => Navigator.of(context).maybePop(),
-                        child: const Text('العودة إلى الرحلة'),
-                      ),
-                    ] else if (!_cashSelected) ...[
-                      DriverHero(
-                        eyebrow: 'طريقة الدفع التي اختارها الراكب',
-                        title: DriverRidePaymentState(_ride).selectedMethodName,
-                        subtitle: _paymentStateMessage,
-                        trailing: const Icon(
-                            Icons.account_balance_wallet_outlined,
-                            color: copper),
-                      ),
-                      const SizedBox(height: 20),
-                      const Text(
-                          'يُكمل الراكب الدفع من تطبيقه. إذا أراد الدفع نقداً فعليه تغيير الطريقة إلى النقد أولاً. لا يمكن إنهاء الرحلة قبل تأكيد السداد.'),
-                      const SizedBox(height: 16),
-                      OutlinedButton.icon(
-                        onPressed: _refreshingFare ? null : _refreshFare,
-                        icon: const Icon(Icons.refresh),
-                        label: const Text('تحديث حالة الدفع'),
-                      ),
-                      TextButton(
-                          onPressed: () => Navigator.of(context).maybePop(),
-                          child: const Text('العودة إلى الرحلة')),
-                    ] else ...[
-                      DriverHero(
-                        eyebrow: 'تحصيل رحلة #${_ride['id']}',
-                        title: '${_totalDue.toStringAsFixed(0)} ر.ي',
-                        subtitle: 'إجمالي المبلغ المطلوب من العميل',
-                        trailing:
-                            const Icon(Icons.payments_outlined, color: copper),
-                      ),
-                      const SizedBox(height: 24),
-                      Text('تفاصيل التحصيل',
-                          style: Theme.of(context).textTheme.titleLarge),
-                      const SizedBox(height: 16),
-                      if (_ride['destinationDisplayName'] != null ||
-                          _ride['destinationAddress'] != null)
-                        Text(
-                            'الوجهة الحالية: ${_ride['destinationDisplayName'] ?? _ride['destinationAddress']}'),
-                      Text('أجرة الرحلة: ${_fare.toStringAsFixed(0)} ر.ي'),
-                      if (_routeChangeFees > 0)
-                        Text(
-                            'منها رسوم تغيير الوجهة: ${_routeChangeFees.toStringAsFixed(0)} ر.ي'),
-                      Text(
-                          'رسوم الانتظار: ${_waitingFee.toStringAsFixed(0)} ر.ي'),
-                      Text(
-                          'رسم الخدمة من العميل: ${_serviceFee.toStringAsFixed(0)} ر.ي'),
-                      Text(
-                          'إجمالي المطلوب تحصيله: ${_totalDue.toStringAsFixed(0)} ر.ي',
-                          style: const TextStyle(fontWeight: FontWeight.bold)),
-                      const Divider(height: 28),
-                      Text(
-                          'عمولتك للمنصة: ${_commission.toStringAsFixed(0)} ر.ي'),
-                      Text(
-                          'رسم الخدمة المستحق للمنصة: ${_serviceFee.toStringAsFixed(0)} ر.ي'),
-                      Text(
-                          'التزامك للمنصة: ${_platformReceivable.toStringAsFixed(0)} ر.ي'),
-                      if (_customerWalletExcess > 0)
-                        Text(
-                          'الزيادة لمحفظة العميل: ${_customerWalletExcess.toStringAsFixed(0)} ر.ي',
-                          style: const TextStyle(color: Colors.deepOrange),
-                        ),
-                      Text(
-                        'إجمالي مديونيتك بعد التحصيل: ${_expectedDriverDebt.toStringAsFixed(0)} ر.ي',
-                        style: const TextStyle(fontWeight: FontWeight.bold),
-                      ),
-                      Text(
-                          'صافي مستحقك من الأجرة: ${_driverNet.toStringAsFixed(0)} ر.ي',
-                          style: const TextStyle(fontWeight: FontWeight.bold)),
-                      const SizedBox(height: 20),
-                      TextField(
-                        controller: _cash,
-                        enabled: !_saving && !_collectionBlocked,
-                        keyboardType: const TextInputType.numberWithOptions(
-                            decimal: true),
-                        decoration: const InputDecoration(
-                          labelText: 'المبلغ المقبوض من العميل',
-                          suffixText: 'ر.ي',
-                          border: OutlineInputBorder(),
-                        ),
-                      ),
-                      const SizedBox(height: 16),
-                      if (_refreshingFare) const LinearProgressIndicator(),
-                      if (_collectionBlocked) Text(_paymentStateMessage),
-                      if (_waitingIsOpen)
-                        const Text(
-                            'يوجد طلب انتظار أو توقف مفتوح. استأنف الرحلة أو اسحب الطلب من شاشة الرحلة قبل التحصيل.'),
-                      if (_fareError != null) Text(_fareError!),
-                      TextButton.icon(
-                        onPressed:
-                            _saving || _refreshingFare ? null : _refreshFare,
-                        icon: const Icon(Icons.refresh),
-                        label: const Text('تحديث الأجرة وحالة الانتظار'),
-                      ),
-                      if (_approvalMessage != null) ...[
-                        Container(
-                          padding: const EdgeInsets.all(12),
-                          decoration: BoxDecoration(
-                            color: _approvalStatus == 1
-                                ? Colors.green.withValues(alpha: .10)
-                                : _approvalStatus == 0
-                                    ? Colors.amber.withValues(alpha: .14)
-                                    : Colors.red.withValues(alpha: .10),
-                            borderRadius: BorderRadius.circular(10),
-                          ),
-                          child: Text(
-                            _approvalMessage!,
-                            textAlign: TextAlign.center,
-                          ),
-                        ),
-                        const SizedBox(height: 16),
-                      ],
-                      FilledButton.icon(
-                        onPressed: _saving ||
-                                _refreshingFare ||
-                                _fareError != null ||
-                                _waitingIsOpen ||
-                                _collectionBlocked ||
-                                _approvalStatus == 0
-                            ? null
-                            : _submit,
-                        icon: _saving
-                            ? const SizedBox(
-                                width: 18,
-                                height: 18,
-                                child:
-                                    CircularProgressIndicator(strokeWidth: 2))
-                            : const Icon(Icons.payments_outlined),
-                        label: Text(_approvalStatus == 1
-                            ? 'إعادة تسجيل التحصيل بعد الموافقة'
-                            : 'تسجيل التحصيل فقط'),
-                      ),
-                      const SizedBox(height: 12),
-                      const Text(
-                        'إذا كان المبلغ أكبر من الإجمالي، يضاف الفرق إلى محفظة العميل وتصبح قيمته التزاماً عليك. وإذا كان أقل، يُرسل طلب موافقة للعميل لتغطية الفرق من محفظته. لا يُخصم شيء ولا تُسجل الدفعة حتى يوافق العميل، ثم أعد تسجيل المبلغ نفسه. إذا لم يكف الرصيد أو رُفض الطلب فلن يكتمل التحصيل.',
-                        textAlign: TextAlign.start,
-                      ),
-                    ],
-                  ],
-                ))),
-      );
+      appBar: AppBar(
+          title: Text(operationalText(
+              'حالة الدفع والتحصيل', 'Payment and collection'))),
+      body: ListView(padding: const EdgeInsets.all(20), children: [
+        Text(operationalText('رحلة #${_ride['id']}', 'Ride #${_ride['id']}'),
+            style: Theme.of(context).textTheme.headlineSmall),
+        Text(_state.selectedMethodName),
+        if (!_state.completed) Text(_state.collectionMessage),
+        if (_state.completed) Text(_state.paidMessage),
+        if (_ride['destinationDisplayName'] != null)
+          Text(operationalText(
+              'الوجهة الحالية: ${_ride['destinationDisplayName']}',
+              'Current destination: ${_ride['destinationDisplayName']}')),
+        if (_number(_ride['routeChangeFees']) > 0)
+          Text(operationalText(
+              'منها رسوم تغيير الوجهة: ${_number(_ride['routeChangeFees']).toStringAsFixed(0)} ر.ي',
+              'Includes destination change fee: ${_number(_ride['routeChangeFees']).toStringAsFixed(0)} YER')),
+        _line(operationalText('إجمالي المستحق', 'Total due'), _due),
+        _line(operationalText('المقبوض المؤكد', 'Confirmed receipts'),
+            _finance['paidAmount'] ?? _ride['paidAmount']),
+        _line(operationalText('المسترد فعلياً', 'Actual refunds'),
+            _finance['refundedAmount'] ?? _ride['refundedAmount']),
+        _line(operationalText('المتبقي للسداد', 'Outstanding balance'),
+            _outstanding),
+        const Divider(),
+        _line(operationalText('أجرة النقل', 'Transport fare'),
+            _ride['customerPrice']),
+        _line(operationalText('الانتظار المعتمد', 'Approved waiting'),
+            _ride['waitingFee']),
+        _line(
+            operationalText('رسوم الخدمة', 'Service fee'), _ride['serviceFee']),
+        _line(
+            operationalText(
+                'صافي مستحق السائق عن الخدمة', 'Driver net entitlement'),
+            _ride['financialDriverEntitlement'] ?? _ride['driverShare']),
+        Text(operationalText(
+            'المستحق غير المحصل مستقل عن الرصيد القابل للسحب. لا يُسجل قبض أو خصم محفظة بمجرد اختيار طريقة الدفع.',
+            'Uncollected entitlement is separate from withdrawable funds. Selecting a method does not record a receipt or wallet debit.')),
+        const SizedBox(height: 16),
+        if (_state.completed)
+          Text(operationalText('تم السداد بالكامل.', 'Fully paid.'),
+              style:
+                  TextStyle(color: Colors.green, fontWeight: FontWeight.bold)),
+        if (_state.pending)
+          Text(operationalText(
+              'محاولة المزود الأصلية لم تُحسم. التحصيل البديل يتطلب حسمها أولاً.',
+              'The original provider attempt is unresolved. Verify it before collecting another payment.')),
+        if (_finance['amountUnderReview'] == true)
+          Text(operationalText(
+              'تراجع الإدارة مبلغ الإلغاء والمسؤولية. لا يُحصّل كامل سعر الرحلة الأصلي قبل اعتماد التسوية.',
+              'Administration is reviewing the cancellation amount and responsibility. Do not collect the original full fare before settlement is approved.')),
+        if (!_state.cashSelected && !_state.completed)
+          Text(operationalText(
+              'يُكمل الراكب الدفع من تطبيقه، أو يغير الطريقة إلى النقد. يمكن إنهاء النقل بعد انتهائه فعلياً مع إبقاء المتبقي للمتابعة.',
+              'The rider can pay in their app or choose cash. Transport can end when physically finished; outstanding money remains for follow-up.')),
+        if (_state.cashSelected && !_state.completed) ...[
+          TextField(
+              controller: _cash,
+              enabled: !_busy && !_blocked,
+              keyboardType:
+                  const TextInputType.numberWithOptions(decimal: true),
+              decoration: InputDecoration(
+                  labelText: operationalText(
+                      'نقد جديد استلمته فعلياً', 'New cash actually received'),
+                  suffixText: operationalText('ر.ي', 'YER'),
+                  border: OutlineInputBorder())),
+          if (_excess > 0)
+            Text(operationalText(
+                'الباقي الواجب إعادته: ${_excess.toStringAsFixed(0)} ر.ي. تُعرض خيارات استلامه للراكب.',
+                'Change owed: ${_excess.toStringAsFixed(0)} YER. The rider chooses how to receive it.')),
+          const SizedBox(height: 12),
+          FilledButton.icon(
+              onPressed: _busy || _refreshing || _blocked || _error != null
+                  ? null
+                  : _submit,
+              icon: const Icon(Icons.payments_outlined),
+              label: Text(
+                  operationalText('تسجيل التحصيل فقط', 'Record collection'))),
+        ],
+        if ((_busy && !_confirming) || _refreshing)
+          const LinearProgressIndicator(),
+        if (_error != null)
+          Container(
+              padding: const EdgeInsets.all(12),
+              color: Colors.red.shade50,
+              child:
+                  Text(_error!, style: TextStyle(color: Colors.red.shade900))),
+        TextButton.icon(
+            onPressed: _busy || _refreshing ? null : _refresh,
+            icon: const Icon(Icons.refresh),
+            label: Text(operationalText(
+                'تحديث الأجرة وحالة الانتظار', 'Refresh fare and waiting'))),
+        OutlinedButton.icon(
+            onPressed: () => Navigator.push<void>(
+                context,
+                MaterialPageRoute(
+                    builder: (_) => RideFinancialFollowUp(
+                        rideId: int.parse('${_ride['id']}'), isDriver: true))),
+            icon: const Icon(Icons.receipt_long_outlined),
+            label: Text(operationalText(
+                'الفاتورة والباقي والاسترجاع', 'Invoice, change and refunds'))),
+        Text(operationalText(
+            'بعد وصول الراكب أو التوقف الآمن، يمكنك إنهاء النقل من شاشة الرحلة حتى لو بقي مبلغ أو مراجعة مالية.',
+            'After arrival or a safe stop, end transport from the ride screen even if money or financial review remains.')),
+      ]));
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _timer?.cancel();
+    _events?.cancel();
+    _connections?.cancel();
+    _cash.removeListener(_cashChanged);
+    _cash.dispose();
+    super.dispose();
+  }
 }
