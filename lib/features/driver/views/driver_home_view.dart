@@ -25,19 +25,29 @@ class _DriverHomeViewState extends State<DriverHomeView> {
       controller.currentUserId != null &&
       '${ride['driverId']}' == '${controller.currentUserId}';
 
-  String _locationMessage() => switch (controller.locationStatus.value) {
-        DriverLocationStatus.serviceDisabled => 'GPS غير مفعل · اضغط للتفعيل',
-        DriverLocationStatus.permissionDenied ||
-        DriverLocationStatus.permissionDeniedForever =>
-          'صلاحية الموقع مطلوبة · اضغط لمنحها',
-        DriverLocationStatus.unavailable =>
-          'تعذر قراءة GPS · تجري إعادة المحاولة تلقائياً',
-        DriverLocationStatus.locating => 'جارٍ تحديد موقعك تلقائياً…',
-        DriverLocationStatus.tracking =>
-          controller.lastLocationSentAt.value == null
-              ? 'تم تحديد موقعك · جارٍ الاتصال بالخادم'
-              : 'تتبع GPS يعمل · موقعك يتحدث تلقائياً',
-      };
+  String _locationMessage() {
+    final position = controller.currentPosition.value;
+    if (controller.locationStatus.value == DriverLocationStatus.tracking &&
+        position != null &&
+        position.accuracy > 75) {
+      return 'الموقع تقريبي (±${position.accuracy.round()} م) · فعّل الموقع الدقيق لتحسين التتبع';
+    }
+    return switch (controller.locationStatus.value) {
+      DriverLocationStatus.serviceDisabled => 'GPS غير مفعل · اضغط للتفعيل',
+      DriverLocationStatus.permissionDenied ||
+      DriverLocationStatus.permissionDeniedForever =>
+        'صلاحية الموقع مطلوبة · اضغط لمنحها',
+      DriverLocationStatus.unavailable =>
+        'تعذر قراءة GPS · تجري إعادة المحاولة تلقائياً',
+      DriverLocationStatus.locating => 'جارٍ تحديد موقعك تلقائياً…',
+      DriverLocationStatus.tracking => controller.lastLocationSentAt.value ==
+                  null ||
+              DateTime.now().difference(controller.lastLocationSentAt.value!) >
+                  const Duration(seconds: 30)
+          ? 'تم تحديد موقعك · جارٍ الاتصال بالخادم'
+          : 'تتبع GPS يعمل · موقعك يتحدث تلقائياً',
+    };
+  }
 
   @override
   Widget build(BuildContext context) => Scaffold(
@@ -194,7 +204,8 @@ class _DriverHomeViewState extends State<DriverHomeView> {
                                 const SizedBox(width: 10),
                                 Expanded(
                                   child: Text(
-                                    _locationMessage(),
+                                    controller.routeRecordingError.value ??
+                                        _locationMessage(),
                                     style:
                                         Theme.of(context).textTheme.bodySmall,
                                   ),
@@ -219,10 +230,15 @@ class _DriverHomeViewState extends State<DriverHomeView> {
                           Text(
                             Get.isRegistered<TrackingHubService>() &&
                                     Get.find<TrackingHubService>()
-                                        .isConnected
+                                        .isStateSynchronized
                                         .value
                                 ? 'تحديث مباشر'
-                                : 'مزامنة تلقائية',
+                                : Get.isRegistered<TrackingHubService>() &&
+                                        Get.find<TrackingHubService>()
+                                            .isConnected
+                                            .value
+                                    ? 'جارٍ مزامنة الحالة'
+                                    : 'الاتصال منقطع · تجري الاستعادة',
                             style: Theme.of(context)
                                 .textTheme
                                 .bodySmall

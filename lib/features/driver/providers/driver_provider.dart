@@ -1,13 +1,23 @@
 import '../../../core/network/api_client.dart';
 import '../../../core/network/api_models.dart';
+import '../../../core/services/otp_push_request_fields.dart';
+import '../../../core/services/otp_sms_service.dart';
 
 import '../models/driver_models.dart';
 
 class DriverProvider {
-  const DriverProvider(this._client);
+  const DriverProvider(this._client, {OtpPushFieldsSupplier? otpPushFields})
+      : _otpPushFields = otpPushFields;
   final ApiClient _client;
+  final OtpPushFieldsSupplier? _otpPushFields;
 
   Future<Map<String, Object?>> login(DriverLoginRequest request) async {
+    final otpFields = await OtpSmsService.prepareRequest(
+      pushFields: () =>
+          _otpPushFields?.call(request.deviceId) ??
+          requestOtpPushFields(_client, deviceId: request.deviceId),
+      allowPushFailure: true,
+    );
     final response = await _client.dio.post<Object?>(
       'auth/login',
       data: <String, Object?>{
@@ -16,6 +26,7 @@ class DriverProvider {
         'deviceId': request.deviceId,
         'trustedDeviceToken': request.trustedDeviceToken,
         'clientType': 'driver',
+        ...otpFields,
       },
     );
     return _requireSuccess(_map(response.data));
@@ -25,7 +36,7 @@ class DriverProvider {
       {required String phone,
       required String code,
       required String challengeId,
-      required String deviceId}) async {
+      required String deviceId,}) async {
     final response = await _client.dio.post<Object?>(
       'auth/sign-in/verify-device',
       data: <String, Object?>{
@@ -52,16 +63,16 @@ class DriverProvider {
   }
 
   Future<void> execute(
-      String model, String operation, Map<String, Object?> data) async {
+      String model, String operation, Map<String, Object?> data,) async {
     final result = await _client.execute<Object?>(
-        model: model, operation: operation, data: data);
+        model: model, operation: operation, data: data,);
     if (result is ApiFailure<Object?>) throw result.problem;
   }
 
   Future<Map<String, Object?>> executeData(
-      String model, String operation, Map<String, Object?> data) async {
+      String model, String operation, Map<String, Object?> data,) async {
     final result = await _client.execute<Object?>(
-        model: model, operation: operation, data: data);
+        model: model, operation: operation, data: data,);
     if (result is ApiFailure<Object?>) throw result.problem;
     final dataValue = (result as ApiSuccess<Object?>).data;
     return dataValue is Map

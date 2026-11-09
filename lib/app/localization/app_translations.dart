@@ -51,8 +51,8 @@ class AppTranslations extends Translations {
           'already_have_account': 'لديك حساب بالفعل؟',
           'dont_have_account': 'ليس لديك حساب؟',
           'otp_title': 'التحقق من رقم الجوال',
-          'otp_subtitle': 'أدخل رمز التحقق المكوّن من 6 أرقام.',
-          'otp_sent_to': 'تم إرسال الرمز إلى @contact',
+          'otp_subtitle': 'أدخل رمز التحقق المرسل إليك والمكوّن من 6 أرقام.',
+          'otp_sent_to': 'أدخل رمز التحقق المرسل إليك للحساب @contact',
           'otp_not_received': 'لم يصلك الرمز؟',
           'resend': 'إعادة الإرسال',
           'set_password_title': 'تعيين كلمة المرور',
@@ -75,9 +75,8 @@ class AppTranslations extends Translations {
           'recovery_identity_subtitle': 'أدخل رقم الجوال المرتبط بحسابك.',
           'send_otp': 'إرسال رمز التحقق',
           'forgot_method_title': 'نسيت كلمة المرور',
-          'forgot_method_subtitle':
-              'اختر وسيلة التواصل التي تريد استلام رمز الاستعادة من خلالها.',
-          'via_sms': 'عبر رسالة نصية',
+          'forgot_method_subtitle': 'تحقق من حسابك لاستعادة كلمة المرور.',
+          'via_sms': 'رمز التحقق',
           'via_email': 'عبر البريد الإلكتروني',
           'reset_otp_title': 'التحقق من الهوية',
           'new_password_title': 'تعيين كلمة مرور جديدة',
@@ -232,8 +231,8 @@ class AppTranslations extends Translations {
           'already_have_account': 'Already have an account?',
           'dont_have_account': "Don't have an account?",
           'otp_title': 'Phone verification',
-          'otp_subtitle': 'Enter the 6-digit verification code.',
-          'otp_sent_to': 'The code was sent to @contact',
+          'otp_subtitle': 'Enter the 6-digit verification code sent to you.',
+          'otp_sent_to': 'Enter the verification code for @contact',
           'otp_not_received': "Didn't receive the code?",
           'resend': 'Resend',
           'set_password_title': 'Set password',
@@ -258,8 +257,8 @@ class AppTranslations extends Translations {
           'send_otp': 'Send OTP',
           'forgot_method_title': 'Forgot password',
           'forgot_method_subtitle':
-              'Choose where to receive the recovery code.',
-          'via_sms': 'Via SMS',
+              'Verify your account to recover your password.',
+          'via_sms': 'Verification code',
           'via_email': 'Via email',
           'reset_otp_title': 'Verify your identity',
           'new_password_title': 'Set a new password',
@@ -372,4 +371,3 @@ class AppTranslations extends Translations {
         },
       };
 }
-

@@ -8,6 +8,7 @@ import '../../core/services/auth_session_service.dart';
 import '../../core/services/connectivity_service.dart';
 import '../../core/services/locale_service.dart';
 import '../../core/services/push_notifications_service.dart';
+import '../../core/services/ride_chat_service.dart';
 import '../../core/services/theme_service.dart';
 import '../../core/storage/secure_storage_service.dart';
 
@@ -37,6 +38,12 @@ class InitialBinding extends Bindings {
         ).init(),
         permanent: true,
       );
+    }
+    if (!Get.isRegistered<RideChatService>()) {
+      Get.put(
+          RideChatService(Get.find<ApiClient>(), Get.find<AuthSessionService>(),
+              Get.find<TrackingHubService>()),
+          permanent: true);
     }
     if (!Get.isRegistered<PushNotificationsService>()) {
       await Get.putAsync<PushNotificationsService>(

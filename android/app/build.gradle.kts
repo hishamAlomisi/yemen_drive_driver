@@ -15,6 +15,14 @@ val localProperties = Properties().apply {
     }
 }
 
+// Java properties retain surrounding quotes; passing those quotes to Maps
+// produces a valid platform view with no map tiles on the device.
+val googleMapsApiKey = localProperties.getProperty("GOOGLE_MAPS_API_KEY", "")
+    .trim().removeSurrounding("\"").removeSurrounding("'").trim()
+require(googleMapsApiKey.matches(Regex("AIza[0-9A-Za-z_-]{35}"))) {
+    "Set a valid GOOGLE_MAPS_API_KEY in android/local.properties before building."
+}
+
 android {
     namespace = "com.example.yemen_drive_driver"
     compileSdk = flutter.compileSdkVersion
@@ -36,7 +44,7 @@ android {
         versionCode = flutter.versionCode
         versionName = flutter.versionName
         manifestPlaceholders["GOOGLE_MAPS_API_KEY"] =
-            localProperties.getProperty("GOOGLE_MAPS_API_KEY", "")
+            googleMapsApiKey
     }
 
     buildTypes {
@@ -66,5 +74,6 @@ flutter {
 }
 
 dependencies {
+    implementation("com.google.android.gms:play-services-auth-api-phone:18.3.0")
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
 }

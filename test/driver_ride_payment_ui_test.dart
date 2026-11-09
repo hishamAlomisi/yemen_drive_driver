@@ -326,6 +326,7 @@ void main() {
       repository.nextDetail = pendingDetail;
       hub.messages.add(const TrackingHubEvent('paymentUpdated', {'rideId': 7}));
       await tester.pump();
+      await tester.pump(const Duration(milliseconds: 110));
       expect(repository.detailReads, 1);
       repository.latest = {
         ..._ride,
@@ -336,6 +337,7 @@ void main() {
       };
       hub.messages.add(const TrackingHubEvent('paymentUpdated', {'rideId': 7}));
       await tester.pump();
+      await tester.pump(const Duration(milliseconds: 110));
       pendingDetail.complete({
         ..._ride,
         'walletPaymentPending': true,

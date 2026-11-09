@@ -6,8 +6,12 @@ import 'package:get/get.dart';
 import '../../../core/network/api_client.dart';
 import '../../../core/network/api_models.dart';
 import '../../../core/realtime/tracking_hub_service.dart';
+import '../../../core/realtime/realtime_state_binding.dart';
 import '../../../core/services/auth_session_service.dart';
+import '../../../core/services/ride_chat_service.dart';
+import '../../../core/services/chat_message_sound.dart';
 import '../../../shared/widgets/chat_quick_replies.dart';
+import '../../../shared/widgets/chat_message_status.dart';
 
 class DriverChatView extends StatefulWidget {
   const DriverChatView({required this.rideId, super.key});
@@ -18,7 +22,8 @@ class DriverChatView extends StatefulWidget {
   State<DriverChatView> createState() => _DriverChatViewState();
 }
 
-class _DriverChatViewState extends State<DriverChatView> {
+class _DriverChatViewState extends State<DriverChatView>
+    with WidgetsBindingObserver {
   static const int _pageSize = 50;
 
   final _input = TextEditingController();
@@ -29,25 +34,66 @@ class _DriverChatViewState extends State<DriverChatView> {
   bool _hasOlderMessages = false;
   bool _sending = false;
   bool _latestLoadInFlight = false;
+  bool _reloadRequested = false;
+  bool _foreground = true;
+  bool _initialLoaded = false;
+  bool _markingRead = false;
+  int _temporaryId = -1;
+  Timer? _refreshTimer;
+  final _soundedIds = <int>{};
+  final _pendingOwnEvents = <int, Map<String, Object?>>{};
   StreamSubscription<TrackingHubEvent>? _eventSubscription;
   StreamSubscription<void>? _connectionSubscription;
+  RealtimeStateBinding? _stateBinding;
 
   ApiClient get _api => Get.find<ApiClient>();
   AuthSessionService get _session => Get.find<AuthSessionService>();
   TrackingHubService get _hub => Get.find<TrackingHubService>();
+  RideChatService get _chat => Get.find<RideChatService>();
+  int get _rideId => int.tryParse(widget.rideId) ?? 0;
+  bool get _visible =>
+      mounted && _foreground && (ModalRoute.of(context)?.isCurrent ?? false);
+  bool get _atBottom =>
+      !_scrollController.hasClients ||
+      _scrollController.position.maxScrollExtent -
+              _scrollController.position.pixels <=
+          120;
 
   @override
   void initState() {
     super.initState();
-    _eventSubscription = _hub.events.listen(_handleHubEvent);
+    WidgetsBinding.instance.addObserver(this);
+    _scrollController.addListener(_markVisibleRead);
+    if (!Get.isRegistered<RideChatService>()) {
+      Get.put(RideChatService(_api, _session, _hub), permanent: true);
+    }
+    _chat.showConversation(_rideId, () => _visible);
+    _stateBinding = RealtimeStateBinding(
+        owner: this,
+        resources: const {'messages'},
+        accepts: (change) =>
+            change.resource == 'messages' &&
+            '${change.resourceId}' == widget.rideId,
+        refresh: () => _load(requireSuccess: true));
+    _eventSubscription = _chat.updates.listen(_handleHubEvent);
     _connectionSubscription = _hub.connectionRestored.listen((_) {
       unawaited(_load());
+    });
+    _refreshTimer = Timer.periodic(const Duration(seconds: 3), (_) {
+      if (_visible) unawaited(_load(quiet: true));
     });
     unawaited(_load());
   }
 
-  Future<void> _load({bool older = false}) async {
-    if (_latestLoadInFlight || (older && _loadingOlder)) return;
+  Future<void> _load(
+      {bool older = false,
+      bool requireSuccess = false,
+      bool quiet = false}) async {
+    if (_latestLoadInFlight || (older && _loadingOlder)) {
+      if (!older) _reloadRequested = true;
+      if (requireSuccess) throw StateError('Messages refresh is in progress');
+      return;
+    }
     if (older && _messages.isEmpty) return;
     if (older) {
       _loadingOlder = true;
@@ -62,6 +108,7 @@ class _DriverChatViewState extends State<DriverChatView> {
                     _scrollController.position.pixels <=
                 120);
     if (mounted) setState(() {});
+    final epoch = _stateBinding?.epoch;
     try {
       final data = <String, Object?>{
         'rideId': widget.rideId,
@@ -83,21 +130,34 @@ class _DriverChatViewState extends State<DriverChatView> {
                 .toList()
             : <Map<String, Object?>>[],
       );
+      if (epoch != null) _stateBinding?.verify(epoch);
+      if (result is ApiFailure<List<Map<String, Object?>>>) {
+        throw StateError(result.problem.title);
+      }
       if (result is ApiSuccess<List<Map<String, Object?>>>) {
+        if (!mounted) return;
         if (older) {
           _mergeMessages(result.data);
           _hasOlderMessages = result.data.length == _pageSize;
         } else {
+          if (_initialLoaded) _soundNewIncoming(result.data);
           _mergeMessages(result.data, scrollToBottom: shouldScrollToBottom);
+          _initialLoaded = true;
           if (!_hasOlderMessages) {
             _hasOlderMessages = result.data.length == _pageSize;
           }
         }
+        unawaited(_chat.acknowledge(_rideId, result.data));
+        _scheduleMarkRead();
       }
-    } catch (_) {
-      if (mounted) {
+    } catch (error) {
+      if (mounted &&
+          error is! StateSnapshotSuperseded &&
+          !requireSuccess &&
+          !quiet) {
         Get.snackbar('تعذر تحميل المحادثة', 'تحقق من الاتصال وحاول مجدداً.');
       }
+      if (requireSuccess) rethrow;
     } finally {
       if (older) {
         _loadingOlder = false;
@@ -106,15 +166,21 @@ class _DriverChatViewState extends State<DriverChatView> {
         _loading = false;
       }
       if (mounted) setState(() {});
+      if (mounted && _reloadRequested && !older) {
+        _reloadRequested = false;
+        unawaited(_load(quiet: true));
+      }
     }
   }
 
   void _handleHubEvent(TrackingHubEvent event) {
-    if (event.name != 'rideMessageCreated' ||
+    if (!{'rideMessageCreated', 'rideMessageUpdated'}.contains(event.name) ||
         '${event.payload['rideId'] ?? ''}' != widget.rideId) {
       return;
     }
     if (mounted) {
+      if (event.name == 'rideMessageCreated')
+        _soundNewIncoming([event.payload]);
       final shouldScrollToBottom = _messages.isEmpty ||
           !_scrollController.hasClients ||
           _scrollController.position.maxScrollExtent -
@@ -122,10 +188,60 @@ class _DriverChatViewState extends State<DriverChatView> {
               120;
       setState(
         () => _mergeMessages(
-          <Map<String, Object?>>[event.payload],
+          <Map<String, Object?>>[
+            // Message content is immutable. A delayed duplicate create must
+            // not replace the canonical row already loaded for this id.
+            if (event.name == 'rideMessageCreated' &&
+                _messages.any((row) => row['id'] == event.payload['id']))
+              {
+                ...event.payload,
+                ..._messages
+                    .firstWhere((row) => row['id'] == event.payload['id'])
+              }
+            else
+              event.payload,
+          ],
           scrollToBottom: shouldScrollToBottom,
         ),
       );
+      _scheduleMarkRead();
+    }
+  }
+
+  void _soundNewIncoming(Iterable<Map<String, Object?>> incoming) {
+    if (!_visible) return;
+    final known = _messages.map((message) => '${message['id']}').toSet();
+    var play = false;
+    for (final message in incoming) {
+      final id = int.tryParse('${message['id']}');
+      if (id != null &&
+          id > 0 &&
+          !known.contains('$id') &&
+          '${message['recipientId']}' == '${_session.currentUserId.value}' &&
+          message['readAtUtc'] == null &&
+          _soundedIds.add(id)) play = true;
+    }
+    if (play) unawaited(ChatMessageSound.play());
+  }
+
+  void _scheduleMarkRead() {
+    WidgetsBinding.instance.addPostFrameCallback((_) => _markVisibleRead());
+  }
+
+  void _markVisibleRead() {
+    if (!_visible || !_atBottom || _markingRead || !_initialLoaded) return;
+    _markingRead = true;
+    unawaited(_chat.acknowledge(_rideId, _messages, read: true).then((rows) {
+      if (mounted && rows.isNotEmpty) setState(() => _mergeMessages(rows));
+    }).whenComplete(() => _markingRead = false));
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _foreground = state == AppLifecycleState.resumed;
+    if (_foreground) {
+      unawaited(_load(quiet: true));
+      _scheduleMarkRead();
     }
   }
 
@@ -137,7 +253,36 @@ class _DriverChatViewState extends State<DriverChatView> {
       for (final message in _messages) '${message['id']}': message,
     };
     for (final message in incoming) {
-      byId['${message['id']}'] = Map<String, Object?>.from(message);
+      final id = '${message['id']}';
+      final serverId = int.tryParse(id);
+      if (_sending &&
+          serverId != null &&
+          serverId > 0 &&
+          '${message['senderId']}' == '${_session.currentUserId.value}' &&
+          _messages.any((row) =>
+              row['pending'] == true && row['content'] == message['content'])) {
+        // Both the sender echo and a canonical refresh can beat the POST
+        // response. Merge them by server id once that response replaces the
+        // pending bubble, preserving simultaneous sends from another device.
+        final previous = _pendingOwnEvents[serverId];
+        _pendingOwnEvents[serverId] = {
+          ...?previous,
+          ...message,
+          'deliveredAtUtc':
+              message['deliveredAtUtc'] ?? previous?['deliveredAtUtc'],
+          'readAtUtc': message['readAtUtc'] ?? previous?['readAtUtc'],
+        };
+        continue;
+      }
+      final previous = byId[id];
+      byId[id] = {
+        ...?previous,
+        ...message,
+        // A stale list response or duplicate create cannot undo receipts.
+        'deliveredAtUtc':
+            message['deliveredAtUtc'] ?? previous?['deliveredAtUtc'],
+        'readAtUtc': message['readAtUtc'] ?? previous?['readAtUtc'],
+      };
     }
     final merged = byId.values.toList()
       ..sort((left, right) {
@@ -156,11 +301,13 @@ class _DriverChatViewState extends State<DriverChatView> {
     if (scrollToBottom) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!_scrollController.hasClients) return;
-        _scrollController.animateTo(
-          _scrollController.position.maxScrollExtent,
-          duration: const Duration(milliseconds: 180),
-          curve: Curves.easeOut,
-        );
+        unawaited(_scrollController
+            .animateTo(
+              _scrollController.position.maxScrollExtent,
+              duration: const Duration(milliseconds: 180),
+              curve: Curves.easeOut,
+            )
+            .then((_) => _markVisibleRead()));
       });
     }
   }
@@ -168,7 +315,22 @@ class _DriverChatViewState extends State<DriverChatView> {
   Future<void> _send() async {
     final content = _input.text.trim();
     if (content.isEmpty || _sending) return;
-    setState(() => _sending = true);
+    final temporaryId = _temporaryId--;
+    final pending = <String, Object?>{
+      'id': temporaryId,
+      'rideId': _rideId,
+      'senderId': _session.currentUserId.value,
+      'content': content,
+      'createdAtUtc': DateTime.now().toUtc().toIso8601String(),
+      'pending': true,
+    };
+    setState(() {
+      _sending = true;
+      _messages.removeWhere((message) =>
+          message['failed'] == true && message['content'] == content);
+      _mergeMessages([pending], scrollToBottom: true);
+    });
+    _input.clear();
     try {
       final result = await _api.execute<Map<String, Object?>>(
         model: 'RideMessageModel',
@@ -182,19 +344,38 @@ class _DriverChatViewState extends State<DriverChatView> {
             json is Map ? Map<String, Object?>.from(json) : <String, Object?>{},
       );
       if (result is ApiSuccess<Map<String, Object?>>) {
+        if (!mounted) return;
+        _messages.removeWhere((message) => message['id'] == temporaryId);
         _mergeMessages(
-          <Map<String, Object?>>[result.data],
+          <Map<String, Object?>>[result.data, ..._pendingOwnEvents.values],
           scrollToBottom: true,
         );
-        _input.clear();
+        _pendingOwnEvents.clear();
       } else {
+        _sendFailed(temporaryId, content);
         Get.snackbar('تعذر إرسال الرسالة', 'حاول مرة أخرى.');
       }
     } catch (_) {
+      _sendFailed(temporaryId, content);
       Get.snackbar('تعذر إرسال الرسالة', 'تحقق من الاتصال وحالة الرحلة.');
     } finally {
       if (mounted) setState(() => _sending = false);
     }
+  }
+
+  void _sendFailed(int id, String content) {
+    if (!mounted) return;
+    final index = _messages.indexWhere((message) => message['id'] == id);
+    if (index >= 0) {
+      _messages[index] = {
+        ..._messages[index],
+        'pending': false,
+        'failed': true
+      };
+    }
+    _mergeMessages(_pendingOwnEvents.values, scrollToBottom: true);
+    _pendingOwnEvents.clear();
+    if (_input.text.isEmpty) _input.text = content;
   }
 
   @override
@@ -288,17 +469,40 @@ class _DriverChatViewState extends State<DriverChatView> {
                                         ),
                                       ),
                                     ),
-                                    child: Text(
-                                      '${message['content'] ?? ''}',
-                                      style: TextStyle(
-                                        color: isDriverMessage
-                                            ? Theme.of(context)
-                                                .colorScheme
-                                                .onPrimary
-                                            : Theme.of(context)
-                                                .colorScheme
-                                                .onSurface,
-                                      ),
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Text('${message['content'] ?? ''}',
+                                            style: TextStyle(
+                                                color: isDriverMessage
+                                                    ? Theme.of(context)
+                                                        .colorScheme
+                                                        .onPrimary
+                                                    : Theme.of(context)
+                                                        .colorScheme
+                                                        .onSurface)),
+                                        const SizedBox(height: 4),
+                                        Row(
+                                            mainAxisSize: MainAxisSize.min,
+                                            children: [
+                                              Text(_messageTime(message),
+                                                  style: TextStyle(
+                                                      fontSize: 11,
+                                                      color: isDriverMessage
+                                                          ? Colors.white70
+                                                          : Theme.of(context)
+                                                              .colorScheme
+                                                              .onSurfaceVariant)),
+                                              if (isDriverMessage) ...[
+                                                const SizedBox(width: 5),
+                                                ChatMessageStatus(
+                                                    message: message,
+                                                    color: Colors.white70),
+                                              ],
+                                            ]),
+                                      ],
                                     ),
                                   ),
                                 );
@@ -346,10 +550,26 @@ class _DriverChatViewState extends State<DriverChatView> {
 
   @override
   void dispose() {
+    _chat.hideConversation(_rideId);
+    WidgetsBinding.instance.removeObserver(this);
+    _refreshTimer?.cancel();
+    _scrollController.removeListener(_markVisibleRead);
+    _stateBinding?.dispose();
     unawaited(_eventSubscription?.cancel());
     unawaited(_connectionSubscription?.cancel());
     _input.dispose();
     _scrollController.dispose();
     super.dispose();
+  }
+
+  String _messageTime(Map<String, Object?> message) {
+    final raw = '${message['createdAtUtc'] ?? ''}';
+    final timestamp = DateTime.tryParse(
+            raw.isNotEmpty && !RegExp(r'(Z|[+-]\d{2}:\d{2})$').hasMatch(raw)
+                ? '${raw}Z'
+                : raw)
+        ?.toLocal();
+    if (timestamp == null) return '';
+    return '${timestamp.hour.toString().padLeft(2, '0')}:${timestamp.minute.toString().padLeft(2, '0')}';
   }
 }

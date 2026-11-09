@@ -25,6 +25,7 @@ class _DriverPaymentViewState extends State<DriverPaymentView>
   late final TextEditingController _cash;
   bool _busy = false;
   bool _refreshing = false;
+  Future<bool>? _refreshTask;
   bool _refreshQueued = false;
   bool _confirming = false;
   String? _error;
@@ -33,7 +34,10 @@ class _DriverPaymentViewState extends State<DriverPaymentView>
   Timer? _timer;
   double _number(Object? value) =>
       value is num ? value.toDouble() : double.tryParse('$value') ?? 0;
-  Map get _finance => _ride['finance'] is Map ? _ride['finance'] as Map : {};
+  Map<Object?, Object?> get _finance =>
+      _ride['finance'] is Map<Object?, Object?>
+          ? _ride['finance']! as Map<Object?, Object?>
+          : {};
   double get _due => _number(_finance['amountDue'] ?? _ride['totalAmount']);
   double get _outstanding =>
       _number(_finance['outstandingAmount'] ?? _ride['outstandingAmount']);
@@ -54,9 +58,24 @@ class _DriverPaymentViewState extends State<DriverPaymentView>
     _ride = Map<String, Object?>.from(widget.ride);
     _cash = TextEditingController(text: _outstanding.toStringAsFixed(0))
       ..addListener(_cashChanged);
+    widget.hub.stateChanges.register(this, (changes) async {
+      if (!changes.any((change) =>
+          change.resource == 'ride' &&
+          '${change.resourceId}' == '${_ride['id']}')) return;
+      await _refresh();
+      if (_error != null) throw StateError(_error!);
+    });
     _events = widget.hub.events.listen((event) {
-      if ('${event.payload['rideId'] ?? event.payload['id']}' ==
-          '${_ride['id']}') unawaited(_refresh());
+      if (widget.hub.supportsStateRecovery.value) return;
+      if (const {
+            'paymentUpdated',
+            'cashApprovalUpdated',
+            'rideStatusUpdated',
+            'rideArrivalUpdated',
+            'rideCancellationUpdated'
+          }.contains(event.name) &&
+          '${event.payload['rideId'] ?? event.payload['id']}' ==
+              '${_ride['id']}') unawaited(_refresh());
     });
     _connections = widget.hub.connectionRestored.listen((_) => _refresh());
     _timer = Timer.periodic(const Duration(seconds: 15), (_) {
@@ -74,11 +93,21 @@ class _DriverPaymentViewState extends State<DriverPaymentView>
     if (state == AppLifecycleState.resumed) unawaited(_refresh());
   }
 
-  Future<bool> _refresh() async {
-    if (_refreshing) {
+  Future<bool> _refresh() {
+    if (_refreshTask != null) {
       _refreshQueued = true;
-      return false;
+      return _refreshTask!;
     }
+    late final Future<bool> task;
+    task = _refreshSnapshot().whenComplete(() {
+      if (identical(_refreshTask, task)) _refreshTask = null;
+    });
+    _refreshTask = task;
+    return task;
+  }
+
+  Future<bool> _refreshSnapshot() async {
+    if (!mounted) return false;
     setState(() => _refreshing = true);
     var unchanged = true;
     try {
@@ -86,10 +115,15 @@ class _DriverPaymentViewState extends State<DriverPaymentView>
         _refreshQueued = false;
         final old = _outstanding;
         final oldVersion = _ride['routeVersion'];
+        final epoch = widget.hub.stateChanges.epochForResources(const {'ride'});
         final suggested = _cash.text == old.toStringAsFixed(0);
         final latest = await widget.repository
             .getRideForPayment(int.parse('${_ride['id']}'));
         if (!mounted) return false;
+        if (epoch != widget.hub.stateChanges.epochForResources(const {'ride'})) {
+          _refreshQueued = true;
+          continue;
+        }
         setState(() {
           _ride = latest;
           _error = null;
@@ -181,7 +215,8 @@ class _DriverPaymentViewState extends State<DriverPaymentView>
       padding: const EdgeInsets.symmetric(vertical: 5),
       child: Row(children: [
         Expanded(child: Text(title)),
-        Text('${_number(amount).toStringAsFixed(0)} ${operationalText('ر.ي', 'YER')}')
+        Text(
+            '${_number(amount).toStringAsFixed(0)} ${operationalText('ر.ي', 'YER')}')
       ]));
   @override
   Widget build(BuildContext context) => Scaffold(
@@ -292,6 +327,7 @@ class _DriverPaymentViewState extends State<DriverPaymentView>
       ]));
   @override
   void dispose() {
+    widget.hub.stateChanges.unregister(this);
     WidgetsBinding.instance.removeObserver(this);
     _timer?.cancel();
     _events?.cancel();

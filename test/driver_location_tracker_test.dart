@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:fake_async/fake_async.dart';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter/foundation.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:yemen_drive_driver/core/services/driver_location_tracker.dart';
 
@@ -12,7 +13,9 @@ class _Gps extends GeolocatorPlatform {
   int reads = 0;
   int requests = 0;
   int streams = 0;
-  final positions = StreamController<Position>.broadcast();
+  Completer<Position>? pendingFix;
+  final streamSettings = <LocationSettings?>[];
+  var positions = StreamController<Position>.broadcast();
   final services = StreamController<ServiceStatus>.broadcast();
 
   @override
@@ -30,6 +33,7 @@ class _Gps extends GeolocatorPlatform {
   @override
   Stream<Position> getPositionStream({LocationSettings? locationSettings}) {
     streams++;
+    streamSettings.add(locationSettings);
     return positions.stream;
   }
 
@@ -37,6 +41,7 @@ class _Gps extends GeolocatorPlatform {
   Future<Position> getCurrentPosition(
       {LocationSettings? locationSettings}) async {
     reads++;
+    if (pendingFix != null) return pendingFix!.future;
     if (failRead) throw TimeoutException('No initial GPS fix');
     return fix();
   }
@@ -158,5 +163,148 @@ void main() {
         fix(timestamp: DateTime.now().subtract(const Duration(minutes: 1))));
     await Future<void>.delayed(Duration.zero);
     expect(delivered, isEmpty);
+  });
+
+  test(
+      'a pending fix does not delay revoking access or publish after GPS is disabled',
+      () async {
+    gps.pendingFix = Completer<Position>();
+    final starting = tracker.start();
+    await Future<void>.delayed(Duration.zero);
+    expect(gps.positions.hasListener, isTrue);
+    gps.enabled = false;
+    await tracker.refresh(forceFix: false);
+    expect(gps.positions.hasListener, isFalse);
+    gps.pendingFix!.complete(fix());
+    await starting;
+    expect(delivered, isEmpty);
+  });
+
+  test('an upload does not delay a new permission check', () async {
+    await tracker.stop();
+    final uploading = Completer<void>();
+    final release = Completer<void>();
+    tracker = DriverLocationTracker(
+        geolocator: gps,
+        onPosition: (_) async {
+          uploading.complete();
+          await release.future;
+        },
+        onStatus: (_) {},
+        onAccessRequired: (_) async {});
+    final starting = tracker.start();
+    await uploading.future;
+    gps.permission = LocationPermission.deniedForever;
+    await tracker.refresh(forceFix: false);
+    expect(gps.positions.hasListener, isFalse);
+    release.complete();
+    await starting;
+  });
+
+  test('duplicate and out-of-order native samples cannot refresh tracking',
+      () async {
+    gps.failRead = true;
+    await tracker.start();
+    final current = fix();
+    gps.positions.add(current);
+    gps.positions.add(current);
+    gps.positions.add(
+        fix(timestamp: current.timestamp.subtract(const Duration(seconds: 1))));
+    await Future<void>.delayed(Duration.zero);
+    expect(delivered, [current]);
+  });
+
+  test(
+      'a failing Android stream automatically restarts with the location manager',
+      () {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    fakeAsync((clock) {
+      unawaited(tracker.start());
+      clock.flushMicrotasks();
+      expect(
+          (gps.streamSettings.single as AndroidSettings).forceLocationManager,
+          isFalse);
+      gps.positions.addError(StateError('Fused provider failed'));
+      clock.flushMicrotasks();
+      expect(gps.positions.hasListener, isFalse);
+      clock.elapse(const Duration(seconds: 1));
+      clock.flushMicrotasks();
+      expect(gps.positions.hasListener, isTrue);
+      expect((gps.streamSettings.last as AndroidSettings).forceLocationManager,
+          isTrue);
+      unawaited(tracker.stop());
+      clock.flushMicrotasks();
+    });
+  });
+
+  test('a completed native stream is subscribed again on the next refresh',
+      () async {
+    await tracker.start();
+    final old = gps.positions;
+    gps.positions = StreamController<Position>.broadcast();
+    await old.close();
+    await tracker.refresh();
+    expect(gps.streams, 2);
+    expect(gps.positions.hasListener, isTrue);
+    final next = fix(
+        timestamp:
+            delivered.last.timestamp.add(const Duration(milliseconds: 1)));
+    gps.positions.add(next);
+    await Future<void>.delayed(Duration.zero);
+    expect(delivered.last, same(next));
+  });
+
+  test(
+      'opening a map accelerates the GPS stream while first-fix upload is slow',
+      () async {
+    await tracker.stop();
+    final uploadStarted = Completer<void>();
+    final releaseUpload = Completer<void>();
+    tracker = DriverLocationTracker(
+        adaptive: true,
+        geolocator: gps,
+        onPosition: (_) async {
+          if (!uploadStarted.isCompleted) uploadStarted.complete();
+          await releaseUpload.future;
+        },
+        onStatus: (_) {},
+        onAccessRequired: (_) async {});
+    final starting = tracker.start();
+    await uploadStarted.future;
+    expect(gps.streams, 1);
+    await tracker.setActivity(
+        activeRide: true, viewed: true, moving: true, available: true);
+    expect(gps.streams, 2);
+    expect(gps.positions.hasListener, true);
+    expect(tracker.requestedInterval, const Duration(seconds: 1));
+    releaseUpload.complete();
+    await starting;
+  });
+
+  test(
+      'adaptive mode does not request a redundant periodic fix while samples arrive',
+      () {
+    fakeAsync((clock) {
+      final adaptiveGps = _Gps();
+      final adaptiveTracker = DriverLocationTracker(
+          adaptive: true,
+          geolocator: adaptiveGps,
+          onPosition: (_) async {},
+          onStatus: (_) {},
+          onAccessRequired: (_) async {});
+      unawaited(adaptiveTracker.start());
+      clock.flushMicrotasks();
+      expect(adaptiveGps.reads, 1);
+      adaptiveGps.positions.add(fix());
+      clock.flushMicrotasks();
+      clock.elapse(const Duration(seconds: 10));
+      clock.flushMicrotasks();
+      expect(adaptiveGps.reads, 1);
+      unawaited(adaptiveTracker.stop());
+      clock.flushMicrotasks();
+      unawaited(adaptiveGps.close());
+      clock.flushMicrotasks();
+    });
   });
 }

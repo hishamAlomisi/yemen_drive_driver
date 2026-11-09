@@ -9,14 +9,20 @@ import 'package:get/get.dart';
 
 import '../../../core/network/api_models.dart';
 import '../../../core/realtime/tracking_hub_service.dart';
+import '../../../core/realtime/state_change_coordinator.dart';
 import '../../../core/services/auth_session_service.dart';
 import '../../../core/services/push_notifications_service.dart';
 import '../../../core/services/driver_location_tracker.dart';
+import '../../../core/services/driver_route_outbox.dart';
+import '../../../core/services/startup_connection_service.dart';
 import '../driver_routes.dart';
 import '../models/driver_ride_payment_state.dart';
+import '../models/driver_request_route.dart';
 import '../repositories/driver_repository.dart';
+import '../repositories/route_repository.dart';
 import '../views/driver_payment_view.dart';
 import '../views/driver_notifications_view.dart';
+import '../views/driver_request_route_view.dart';
 
 /// The latest verified passenger GPS sample for one assigned ride.
 ///
@@ -37,9 +43,13 @@ class PassengerLocationUpdate {
 }
 
 class DriverController extends GetxController with WidgetsBindingObserver {
-  DriverController(this._repository, this._session);
+  DriverController(this._repository, this._session, {RouteRepository? routes}) {
+    requestRouteCache = DriverRequestRouteCache(
+        () => routes ?? ApiRoutesRepository(Get.find<ApiClient>()));
+  }
   final DriverRepository _repository;
   final AuthSessionService _session;
+  late final DriverRequestRouteCache requestRouteCache;
   final isLoading = false.obs;
   final RxnString error = RxnString();
   final Rxn<Position> currentPosition = Rxn<Position>();
@@ -75,13 +85,28 @@ class DriverController extends GetxController with WidgetsBindingObserver {
   bool _refreshQueued = false;
   StreamSubscription<TrackingHubEvent>? _hubEventSubscription;
   StreamSubscription<void>? _hubConnectionSubscription;
+  StreamSubscription<void>? _apiRecoverySubscription;
+  Future<void> Function(Map<String, String>)? _notificationOpenedHandler;
   bool _refreshInFlight = false;
+  Future<void>? _loadTask;
   bool _initialSnapshotLoaded = false;
-  final List<TrackingHubEvent> _eventsReceivedDuringRefresh =
-      <TrackingHubEvent>[];
+  final Map<String, TrackingHubEvent> _eventsReceivedDuringRefresh = {};
+  final Set<int> _legacyRideRefreshes = {};
+  final Set<int> _legacyPaymentRefreshes = {};
+  Timer? _legacyRefreshTimer;
+  bool _legacyNotificationsRefresh = false;
   bool _locationUpdateInFlight = false;
+  ({Position position, int driverId, int? rideId})? _pendingLivePosition;
+  Timer? _liveLocationRetry;
+  DriverRouteOutbox? _routeOutbox;
+  Timer? _routeRetry;
+  final RxnString routeRecordingError = RxnString();
+  int? _viewedRideId;
+  DateTime? _viewedUntil;
   DateTime? _lastLocationSentAt;
   Position? _lastSentPosition;
+  int? _lastSentRideId;
+  int? _lastTrackingRideId;
   final Map<int, int> _requestVersions = {};
   int _requestSnapshotVersion = 0;
   final cancellationRequestsInFlight = <int>{}.obs;
@@ -90,15 +115,72 @@ class DriverController extends GetxController with WidgetsBindingObserver {
 
   int? get currentUserId => _session.currentUserId.value;
 
+  TrackingHubService? get _hub => Get.isRegistered<TrackingHubService>()
+      ? Get.find<TrackingHubService>()
+      : null;
+  int get _rideEpoch =>
+      _hub?.stateChanges.epochForResources(const {'ride'}) ?? 0;
+  int get _snapshotEpoch =>
+      _hub?.stateChanges
+          .epochForResources(const {'ride', 'profile', 'catalog'}) ??
+      0;
+  int get _notificationEpoch =>
+      _hub?.stateChanges.epochForResources(const {'notifications'}) ?? 0;
+  int get _walletEpoch =>
+      _hub?.stateChanges.epochForResources(const {'wallet', 'account'}) ?? 0;
+  bool get _apiUnavailable =>
+      Get.isRegistered<StartupConnectionService>() &&
+      Get.find<StartupConnectionService>().runtimeUnavailable.value;
+  bool get _durableSynchronized =>
+      _hub?.supportsStateRecovery.value == true &&
+      _hub?.isStateSynchronized.value == true &&
+      _hub?.stateChanges.covers(this) == true;
+
+  Future<void> _reconcileState(List<StateChange> changes) async {
+    if (isClosed) return;
+    final resources = changes.map((change) => change.resource).toSet();
+    if (resources.any({'ride', 'profile', 'catalog'}.contains)) {
+      // The authorized list also removes requests no longer available to us.
+      await _queueSnapshotLoad(false);
+    } else if (resources.contains('notifications')) {
+      await _refreshNotifications(announceRequests: true, requireSuccess: true);
+    }
+    if (resources.any({'wallet', 'account'}.contains)) {
+      await _queueWalletLoad();
+      if (_driverAccountLoaded) await _queueDriverAccountLoad();
+    }
+  }
+
   PassengerLocationUpdate? passengerLocationForRide(int rideId) =>
       passengerLocationsByRideId[rideId];
 
   @override
   void onReady() {
     super.onReady();
+    _notificationOpenedHandler = _handleOpenedNotification;
+    _session.onNotificationOpened = _notificationOpenedHandler;
     WidgetsBinding.instance.addObserver(this);
+    if (Get.isRegistered<StartupConnectionService>()) {
+      _apiRecoverySubscription =
+          Get.find<StartupConnectionService>().recovered.listen((_) {
+        if (isClosed || _paused || !_session.isAuthenticated.value) return;
+        // Reconcile canonical reads; never repeat heading, payment or other
+        // user commands whose outcome may be unknown after a lost response.
+        unawaited(load(showLoading: false));
+        if (isWalletLoaded.value) unawaited(loadWallet(quiet: true));
+        if (_driverAccountLoaded) {
+          unawaited(_queueDriverAccountLoad().catchError((Object _) {}));
+        }
+        unawaited(_locationTracker?.refresh() ?? Future<void>.value());
+        _retryLatestLocation();
+      });
+    }
     _automaticSyncTimer = Timer.periodic(const Duration(seconds: 15), (_) {
-      if (!_paused && !isClosed && _session.isAuthenticated.value) {
+      if (!_paused &&
+          !isClosed &&
+          _session.isAuthenticated.value &&
+          !_apiUnavailable &&
+          !_durableSynchronized) {
         unawaited(load(showLoading: false));
       }
     });
@@ -106,7 +188,25 @@ class DriverController extends GetxController with WidgetsBindingObserver {
   }
 
   Future<void> _startRealtimeAndLocation() async {
+    if (const bool.fromEnvironment('DURABLE_DRIVER_SAMPLES')) {
+      _routeOutbox = DriverRouteOutbox(
+        store: SqliteDriverRouteStore(),
+        send: (payload) =>
+            Get.find<TrackingHubService>().publishDriverLocationBatch(payload),
+        isCurrentAccount: (id) =>
+            !isClosed && currentUserId == id && _session.isAuthenticated.value,
+        onChanged: () {
+          if (!isClosed)
+            routeRecordingError.value = _routeOutbox?.failure?.toString();
+        },
+      );
+      _routeRetry = Timer.periodic(const Duration(seconds: 5), (_) {
+        if (currentUserId != null) unawaited(_flushRouteSamples());
+      });
+      unawaited(_flushRouteSamples());
+    }
     _locationTracker = DriverLocationTracker(
+      adaptive: const bool.fromEnvironment('DURABLE_DRIVER_SAMPLES'),
       onPosition: _publishLocation,
       onStatus: (status) {
         if (!isClosed) locationStatus.value = status;
@@ -129,8 +229,10 @@ class DriverController extends GetxController with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     _paused = state != AppLifecycleState.resumed;
+    unawaited(_hub?.setForeground(!_paused) ?? Future<void>.value());
     if (_paused || isClosed || !_session.isAuthenticated.value) return;
     unawaited(_locationTracker?.refresh() ?? Future<void>.value());
+    _retryLatestLocation();
     unawaited(load(showLoading: false));
     if (isWalletLoaded.value) unawaited(loadWallet(quiet: true));
   }
@@ -146,7 +248,13 @@ class DriverController extends GetxController with WidgetsBindingObserver {
     final rideId = int.tryParse('${payload['rideId'] ?? ''}');
     if (_opensWallet(action, payload)) {
       if (notification != null) await markNotificationRead(notification);
-      Get.offAllNamed<void>(DriverRoutes.wallet, arguments: payload);
+      var found = false;
+      Get.until((route) {
+        found = route.settings.name == DriverRoutes.wallet;
+        return found || route.isFirst;
+      });
+      if (!found) Get.toNamed<void>(DriverRoutes.wallet, arguments: payload);
+      unawaited(loadWallet());
       return;
     }
 
@@ -198,6 +306,13 @@ class DriverController extends GetxController with WidgetsBindingObserver {
     showNotifications();
   }
 
+  Future<void> _handleOpenedNotification(Map<String, String> payload) async {
+    if (isClosed || !_session.isAuthenticated.value) return;
+    await load(showLoading: false);
+    if (isClosed || !_session.isAuthenticated.value) return;
+    await _openPushNotification(payload);
+  }
+
   bool _opensWallet(String? action, Map<String, String> payload) =>
       action == 'open_wallet' ||
       action == 'open_wallet_transaction' ||
@@ -209,10 +324,12 @@ class DriverController extends GetxController with WidgetsBindingObserver {
   Future<void> _startRealtimeAndLoad() async {
     if (Get.isRegistered<TrackingHubService>()) {
       final hub = Get.find<TrackingHubService>();
+      hub.stateChanges.register(this, _reconcileState);
       _hubEventSubscription = hub.events.listen(_handleHubEvent);
       _hubConnectionSubscription = hub.connectionRestored.listen((_) {
         if (_initialSnapshotLoaded) unawaited(load(showLoading: false));
         if (isWalletLoaded.value) unawaited(loadWallet(quiet: true));
+        _retryLatestLocation();
       });
       unawaited(hub.setUserEventListening(this, true));
     }
@@ -221,27 +338,61 @@ class DriverController extends GetxController with WidgetsBindingObserver {
   }
 
   void _handleHubEvent(TrackingHubEvent event) {
+    if (isClosed) return;
+    if (event.name == 'trackingDemandChanged') {
+      _viewedRideId = event.payload['hasViewers'] == true
+          ? int.tryParse('${event.payload['rideId']}')
+          : null;
+      _viewedUntil = DateTime.tryParse('${event.payload['expiresAtUtc']}');
+      _updateTrackingActivity();
+      return;
+    }
+    // Location delivery is independent from a slow business-state snapshot.
+    // Never queue every GPS packet behind an HTTP request.
+    if (event.name == 'passengerLocationUpdated') {
+      final rideId =
+          int.tryParse('${event.payload['rideId'] ?? event.payload['id']}');
+      if (rideId != null) _applyPassengerLocationUpdate(rideId, event.payload);
+      return;
+    }
+    if (event.name == 'driverLocationUpdated' ||
+        event.name == 'nearbyDriverLocationUpdated') return;
+    if (_hub?.supportsStateRecovery.value == true &&
+        !const {
+          'driverLocationUpdated',
+          'passengerLocationUpdated',
+          'nearbyDriverLocationUpdated',
+          'trackingDemandChanged'
+        }.contains(event.name)) {
+      return;
+    }
     if (_refreshInFlight) {
-      _eventsReceivedDuringRefresh.add(event);
+      final key =
+          '${event.name}:${event.payload['rideId'] ?? event.payload['id'] ?? ''}';
+      _eventsReceivedDuringRefresh.remove(key);
+      if (_eventsReceivedDuringRefresh.length >= 128) {
+        _eventsReceivedDuringRefresh
+            .remove(_eventsReceivedDuringRefresh.keys.first);
+        _refreshQueued = true; // A full snapshot restores any evicted resource.
+      }
+      _eventsReceivedDuringRefresh[key] = event;
       return;
     }
     final payload = event.payload;
     if (event.name == 'notificationCreated') {
-      unawaited(_refreshNotifications(announceRequests: true));
-      unawaited(loadWallet(quiet: true));
+      _legacyNotificationsRefresh = true;
+      _scheduleLegacyRefresh();
       return;
     }
     final rideId = int.tryParse('${payload['id'] ?? payload['rideId'] ?? ''}');
     if (rideId == null) return;
 
-    if (event.name == 'passengerLocationUpdated') {
-      _applyPassengerLocationUpdate(rideId, payload);
-      return;
-    }
     if (event.name == 'rideArrivalUpdated' ||
         event.name == 'rideCancellationUpdated' ||
+        event.name == 'rideRouteChangeUpdated' ||
         event.name == 'cashApprovalUpdated') {
-      unawaited(refreshRide(rideId).catchError((Object _) {}));
+      _legacyRideRefreshes.add(rideId);
+      _scheduleLegacyRefresh();
       return;
     }
 
@@ -257,11 +408,9 @@ class DriverController extends GetxController with WidgetsBindingObserver {
       return;
     }
     if (event.name == 'paymentUpdated') {
-      if (paymentEnabledRideIds.contains(rideId)) {
-        unawaited(_refreshEnabledPayment(rideId));
-      } else {
-        unawaited(refreshRide(rideId).catchError((Object _) {}));
-      }
+      _legacyPaymentRefreshes.add(rideId);
+      _legacyRideRefreshes.add(rideId);
+      _scheduleLegacyRefresh();
       return;
     }
     if (event.name == 'rideStatusUpdated') {
@@ -293,7 +442,8 @@ class DriverController extends GetxController with WidgetsBindingObserver {
       }
       // Route approvals keep the same ride status. Fetch the authoritative
       // destination and fare for every update, including these approvals.
-      unawaited(refreshRide(rideId).catchError((Object _) {}));
+      _legacyRideRefreshes.add(rideId);
+      _scheduleLegacyRefresh();
       return;
     }
     if (event.name != 'offerUpdated') return;
@@ -327,6 +477,33 @@ class DriverController extends GetxController with WidgetsBindingObserver {
     updatedRide['driverOfferExpiresAtUtc'] = payload['expiresAtUtc'];
     updatedRide['driverOfferStatus'] = payload['status'];
     rides[index] = updatedRide;
+  }
+
+  void _scheduleLegacyRefresh() {
+    if (isClosed || _legacyRefreshTimer != null) return;
+    _legacyRefreshTimer = Timer(const Duration(milliseconds: 100), () {
+      _legacyRefreshTimer = null;
+      if (isClosed) return;
+      final ids = _legacyRideRefreshes.toList(growable: false);
+      final payments = Set<int>.of(_legacyPaymentRefreshes);
+      final notifications = _legacyNotificationsRefresh;
+      _legacyRideRefreshes.clear();
+      _legacyPaymentRefreshes.clear();
+      _legacyNotificationsRefresh = false;
+      // The shared recovery callback refreshes snapshots once the API returns.
+      if (_apiUnavailable || _paused) return;
+      for (final id in ids) {
+        if (payments.contains(id) && paymentEnabledRideIds.contains(id)) {
+          unawaited(_refreshEnabledPayment(id));
+        } else {
+          unawaited(refreshRide(id).catchError((Object _) {}));
+        }
+      }
+      if (notifications) {
+        unawaited(_refreshNotifications(announceRequests: true));
+        unawaited(loadWallet(quiet: true));
+      }
+    });
   }
 
   void _applyPassengerLocationUpdate(
@@ -460,6 +637,11 @@ class DriverController extends GetxController with WidgetsBindingObserver {
     if (submitted == null) return;
     cancellationRequestsInFlight.add(id);
     try {
+      // Cancellation can freeze the travelled fare just like finishing a ride.
+      // Preserve recorded points before the server captures that boundary.
+      if ('${ride['status']}' == '5' || ride['startedAtUtc'] != null) {
+        await ensureRouteSamplesSaved(id);
+      }
       final result = await _repository.requestRideCancellation(id, submitted,
           safeStopConfirmed: '${ride['status']}' == '5');
       Get.snackbar(
@@ -489,7 +671,14 @@ class DriverController extends GetxController with WidgetsBindingObserver {
       try {
         do {
           _rideRefreshRequested.remove(rideId);
+          final account = currentUserId;
+          final epoch = _rideEpoch;
           final latest = await _repository.getRide(rideId);
+          if (isClosed || account != currentUserId) return;
+          if (epoch != _rideEpoch) {
+            _rideRefreshRequested.add(rideId);
+            continue;
+          }
           _upsertRide(latest, rideId);
           if (latest['customerPaymentEnabled'] == true &&
               latest['paymentCompleted'] != true) {
@@ -506,7 +695,16 @@ class DriverController extends GetxController with WidgetsBindingObserver {
   }
 
   void _syncActiveRideSubscriptions() {
+    _updateTrackingActivity();
     _prunePassengerLocations();
+    final account = currentUserId;
+    final activeRide = account == null ? null : _activeTrackingRideId(account);
+    if (_lastTrackingRideId != activeRide) {
+      _lastTrackingRideId = activeRide;
+      if (activeRide != null) {
+        unawaited(_locationTracker?.refresh() ?? Future<void>.value());
+      }
+    }
     if (!Get.isRegistered<TrackingHubService>()) return;
     final rideIds = rides
         .where(_isTrackableDriverRide)
@@ -516,11 +714,34 @@ class DriverController extends GetxController with WidgetsBindingObserver {
   }
 
   Future<void> load({bool showLoading = true}) async {
-    if (isClosed) return;
-    if (_refreshInFlight) {
-      _refreshQueued = true;
-      return;
+    try {
+      await _queueSnapshotLoad(showLoading);
+    } on Object {
+      // The last usable snapshot stays visible. Durable owners retry failures.
     }
+  }
+
+  Future<void> _queueSnapshotLoad(bool showLoading) {
+    if (_loadTask != null) {
+      _refreshQueued = true;
+      return _loadTask!;
+    }
+    late final Future<void> task;
+    task = (() async {
+      do {
+        _refreshQueued = false;
+        await _loadOnce(showLoading: showLoading);
+      } while (_refreshQueued && !isClosed);
+    })()
+        .whenComplete(() {
+      if (identical(_loadTask, task)) _loadTask = null;
+    });
+    _loadTask = task;
+    return task;
+  }
+
+  Future<void> _loadOnce({required bool showLoading}) async {
+    if (isClosed) return;
     _refreshInFlight = true;
     // A fresh reconnect snapshot supersedes earlier invitation verification.
     _requestSnapshotVersion++;
@@ -530,8 +751,24 @@ class DriverController extends GetxController with WidgetsBindingObserver {
     }
     final versionsAtStart = Map<int, int>.of(_rideSnapshotVersions);
     try {
-      final snapshot = await _repository.load(_session.currentUserId.value);
+      final needsIdentity =
+          _session.isAuthenticated.value && currentUserId == null;
+      if (needsIdentity && !await _session.ensureIdentity()) {
+        throw const FormatException(
+            'تعذر تأكيد حساب السائق. أعد تحديث الاتصال.');
+      }
       if (isClosed) return;
+      if (needsIdentity) {
+        unawaited(_locationTracker?.refresh() ?? Future<void>.value());
+      }
+      final account = currentUserId;
+      final epoch = _snapshotEpoch;
+      final snapshot = await _repository.load(_session.currentUserId.value);
+      if (isClosed || account != currentUserId) return;
+      if (epoch != _snapshotEpoch) {
+        _refreshQueued = true;
+        return;
+      }
       profile.value = snapshot.profile;
       final previousRides = {
         for (final ride in rides) '${ride['id']}': ride,
@@ -557,39 +794,22 @@ class DriverController extends GetxController with WidgetsBindingObserver {
                 ride['paymentCompleted'] != true)
             .map((ride) => int.tryParse('${ride['id']}'))
             .whereType<int>());
-      final activeRideIds = rides
-          .where(
-            (ride) =>
-                ride['driverId']?.toString() ==
-                    _session.currentUserId.value?.toString() &&
-                _trackableRideStatuses.contains(
-                  int.tryParse('${ride['status']}'),
-                ),
-          )
-          .map((ride) => int.tryParse('${ride['id']}'))
-          .whereType<int>();
-      if (Get.isRegistered<TrackingHubService>()) {
-        unawaited(
-          Get.find<TrackingHubService>().setRideSubscriptions(activeRideIds),
-        );
-      }
-      await _refreshNotifications(announceRequests: true);
+      _syncActiveRideSubscriptions();
+      await _refreshNotifications(announceRequests: true, requireSuccess: true);
     } catch (exception) {
       // A transient polling failure must not hide the last usable snapshot.
       if (showLoading || rides.isEmpty) error.value = exception.toString();
+      rethrow;
     } finally {
       _refreshInFlight = false;
       if (showLoading) isLoading.value = false;
       if (_eventsReceivedDuringRefresh.isNotEmpty) {
-        final queued = List<TrackingHubEvent>.of(_eventsReceivedDuringRefresh);
+        final queued =
+            List<TrackingHubEvent>.of(_eventsReceivedDuringRefresh.values);
         _eventsReceivedDuringRefresh.clear();
         for (final event in queued) {
           _handleHubEvent(event);
         }
-      }
-      if (_refreshQueued && !isClosed) {
-        _refreshQueued = false;
-        unawaited(load(showLoading: false));
       }
     }
   }
@@ -688,12 +908,24 @@ class DriverController extends GetxController with WidgetsBindingObserver {
         if (confirmed != true) return;
         confirmPassengerBoarding = true;
       }
+      if (status == 5) await ensureRouteSamplesSaved(id);
       await _repository.updateRideStatus(
           rideId: id,
           status: status,
           confirmPassengerBoarding: confirmPassengerBoarding);
       Get.snackbar('تم التحديث', 'أصبحت الحالة: $label');
-      await load();
+      await refreshRide(id);
+      unawaited(_locationTracker?.refresh() ?? Future<void>.value());
+      final latest =
+          rides.where((item) => '${item['id']}' == '$id').firstOrNull;
+      if (latest != null && '${latest['status']}' == '$status' && !isClosed) {
+        if (status == 4) {
+          unawaited(openPickupNavigation(latest));
+        } else if (status == 5) {
+          unawaited(openDestinationNavigation(latest));
+        }
+      }
+      unawaited(load(showLoading: false));
     } catch (exception) {
       final message = exception is ApiProblemDetails
           ? (exception.detail?.trim().isNotEmpty == true
@@ -752,6 +984,7 @@ class DriverController extends GetxController with WidgetsBindingObserver {
     ));
     if (approved != true) return;
     try {
+      await ensureRouteSamplesSaved(id);
       final result = await Get.find<ApiClient>().execute<Object?>(
           model: 'RideServiceModel',
           operation: 'finish',
@@ -775,6 +1008,7 @@ class DriverController extends GetxController with WidgetsBindingObserver {
       return;
     }
     try {
+      await ensureRouteSamplesSaved(id);
       await _repository.updateRideStatus(
           rideId: id,
           status: int.tryParse('${ride['status']}') ?? 5,
@@ -810,20 +1044,77 @@ class DriverController extends GetxController with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _refreshNotifications({bool announceRequests = false}) async {
+  Future<void>? _notificationTask;
+  bool _notificationsQueued = false;
+  final Set<String> _announcedRouteDeviationNotifications = {};
+  Future<void> _refreshNotifications(
+      {bool announceRequests = false, bool requireSuccess = false}) async {
     try {
-      final latest = await _repository.notifications();
-      if (isClosed) return;
-      notifications.assignAll(latest);
-      if (announceRequests && Get.isRegistered<PushNotificationsService>()) {
-        for (final item in notifications) {
-          if (item['isRead'] == true) continue;
-          await Get.find<PushNotificationsService>()
-              .showRideRequestNotification(item);
-        }
+      if (_notificationTask != null) {
+        _notificationsQueued = true;
+        await _notificationTask;
+        return;
       }
+      late final Future<void> task;
+      task = (() async {
+        do {
+          _notificationsQueued = false;
+          final account = currentUserId;
+          final epoch = _notificationEpoch;
+          final latest = await _repository.notifications();
+          if (isClosed || account != currentUserId) return;
+          if (epoch != _notificationEpoch) {
+            _notificationsQueued = true;
+            continue;
+          }
+          notifications.assignAll(latest);
+          if (announceRequests) _announceRouteDeviations();
+          if (announceRequests &&
+              Get.isRegistered<PushNotificationsService>()) {
+            for (final item in notifications) {
+              if (item['isRead'] == true) continue;
+              await Get.find<PushNotificationsService>()
+                  .showRideRequestNotification(item);
+            }
+          }
+        } while (_notificationsQueued && !isClosed);
+      })()
+          .whenComplete(() {
+        if (identical(_notificationTask, task)) _notificationTask = null;
+      });
+      _notificationTask = task;
+      await task;
     } catch (_) {
+      if (requireSuccess) rethrow;
       // The notification snapshot remains available if this request fails.
+    }
+  }
+
+  void _announceRouteDeviations() {
+    if (_paused || Get.key.currentState == null) return;
+    for (final item in notifications) {
+      if (item['isRead'] == true || item['id'] == null) continue;
+      Map<Object?, Object?> data;
+      try {
+        final decoded = jsonDecode('${item['dataJson'] ?? '{}'}');
+        if (decoded is! Map) continue;
+        data = Map<Object?, Object?>.from(decoded);
+      } on Object {
+        continue;
+      }
+      if (data['action'] != 'route_deviation_reported') continue;
+      final key = '$currentUserId:${item['id']}';
+      if (!_announcedRouteDeviationNotifications.add(key)) continue;
+      Get.snackbar(
+        '${item['title'] ?? 'بلاغ انحراف عن مسار الرحلة'}',
+        '${item['body'] ?? 'أرسل الراكب بلاغاً عن انحراف مسار الرحلة.'}',
+        icon: const Icon(Icons.alt_route_rounded),
+        duration: const Duration(seconds: 6),
+        mainButton: TextButton(
+          onPressed: showNotifications,
+          child: const Text('عرض الإشعار'),
+        ),
+      );
     }
   }
 
@@ -861,6 +1152,7 @@ class DriverController extends GetxController with WidgetsBindingObserver {
           latest['customerPaymentEnabled'] != true) {
         // Freeze the agreed route and fare before the collection screen opens.
         // The API also refuses this transition while a route request is pending.
+        await ensureRouteSamplesSaved(id);
         await _repository.updateRideStatus(
             rideId: id, status: 5, customerPaymentEnabled: true);
         latest = await _repository.getRideForPayment(id);
@@ -884,17 +1176,42 @@ class DriverController extends GetxController with WidgetsBindingObserver {
   }
 
   bool _walletRefreshRequested = false;
+  Future<void>? _walletTask;
   Future<void> loadWallet({bool quiet = false}) async {
-    if (isWalletLoading.value) {
-      _walletRefreshRequested = true;
-      return;
+    try {
+      await _queueWalletLoad();
+    } catch (_) {
+      if (!quiet)
+        Get.snackbar('تعذر تحميل المحفظة', 'تحقق من الاتصال ثم أعد المحاولة.');
     }
+  }
+
+  Future<void> _queueWalletLoad() {
+    if (_walletTask != null) {
+      _walletRefreshRequested = true;
+      return _walletTask!;
+    }
+    late final Future<void> task;
+    task = _loadWalletSnapshot().whenComplete(() {
+      if (identical(_walletTask, task)) _walletTask = null;
+    });
+    _walletTask = task;
+    return task;
+  }
+
+  Future<void> _loadWalletSnapshot() async {
     isWalletLoading.value = true;
     try {
       do {
         _walletRefreshRequested = false;
+        final account = currentUserId;
+        final epoch = _walletEpoch;
         final wallet = await _repository.getWallet();
-        if (isClosed) return;
+        if (isClosed || account != currentUserId) return;
+        if (epoch != _walletEpoch) {
+          _walletRefreshRequested = true;
+          continue;
+        }
         walletBalance.value = _number(wallet['balance']);
         walletLedgerDebt.value = _number(wallet['ledgerDebt']);
         final items = wallet['transactions'];
@@ -906,18 +1223,47 @@ class DriverController extends GetxController with WidgetsBindingObserver {
             : const <Map<String, Object?>>[]);
         isWalletLoaded.value = true;
       } while (_walletRefreshRequested);
-    } catch (_) {
-      if (!quiet)
-        Get.snackbar('تعذر تحميل المحفظة', 'تحقق من الاتصال ثم أعد المحاولة.');
     } finally {
       isWalletLoading.value = false;
     }
   }
 
   Future<void> loadDriverAccount() async {
-    if (isDriverAccountLoading.value) return;
+    try {
+      await _queueDriverAccountLoad();
+    } on Object {
+      Get.snackbar(
+          'تعذر تحميل حساب السائق', 'تحقق من الاتصال ثم أعد المحاولة.');
+    }
+  }
+
+  bool _driverAccountLoaded = false;
+  bool _driverAccountQueued = false;
+  Future<void>? _driverAccountTask;
+  Future<void> _queueDriverAccountLoad() {
+    if (_driverAccountTask != null) {
+      _driverAccountQueued = true;
+      return _driverAccountTask!;
+    }
+    late final Future<void> task;
+    task = (() async {
+      do {
+        _driverAccountQueued = false;
+        await _loadDriverAccountSnapshot();
+      } while (_driverAccountQueued && !isClosed);
+    })()
+        .whenComplete(() {
+      if (identical(_driverAccountTask, task)) _driverAccountTask = null;
+    });
+    _driverAccountTask = task;
+    return task;
+  }
+
+  Future<void> _loadDriverAccountSnapshot() async {
     isDriverAccountLoading.value = true;
     try {
+      final account = currentUserId;
+      final epoch = _walletEpoch;
       final from = financialFrom.value;
       final to = financialTo.value;
       final report = await _repository.getFinancialReport(<String, Object?>{
@@ -928,6 +1274,12 @@ class DriverController extends GetxController with WidgetsBindingObserver {
           'query': financialSearch.value.trim(),
         if (financialType.value != null) 'entryType': financialType.value,
       });
+      if (isClosed || account != currentUserId) return;
+      if (epoch != _walletEpoch) {
+        _driverAccountQueued = true;
+        return;
+      }
+      _driverAccountLoaded = true;
       driverAccountBalance.value = _number(report['balance']);
       driverCommissionTotal.value = _number(report['totalCommission']);
       final items = report['transactions'];
@@ -937,9 +1289,6 @@ class DriverController extends GetxController with WidgetsBindingObserver {
               .map((item) => Map<String, Object?>.from(item))
               .toList()
           : const <Map<String, Object?>>[]);
-    } catch (exception) {
-      Get.snackbar(
-          'تعذر تحميل حساب السائق', 'تحقق من الاتصال ثم أعد المحاولة.');
     } finally {
       isDriverAccountLoading.value = false;
     }
@@ -964,6 +1313,25 @@ class DriverController extends GetxController with WidgetsBindingObserver {
       _openNavigation(ride, ride['pickupLatitude'], ride['pickupLongitude'],
           'نقطة انطلاق العميل');
 
+  Future<void> openRequestRoutePreview(Map<String, Object?> ride) async {
+    final pickup =
+        requestCoordinates(ride['pickupLatitude'], ride['pickupLongitude']);
+    final destination = requestCoordinates(
+        ride['destinationLatitude'], ride['destinationLongitude']);
+    if (pickup == null || destination == null) {
+      Get.snackbar('المسار غير متاح',
+          'لم تصل إحداثيات الانطلاق والوجهة لهذا الطلب. يمكنك تحديث الطلبات والمحاولة مجدداً.');
+      return;
+    }
+    await Get.to<void>(() => DriverRequestRouteView(
+          ride: ride,
+          cache: requestRouteCache,
+          pickup: pickup,
+          destination: destination,
+          driverOrigin: currentRequestOrigin(currentPosition.value),
+        ));
+  }
+
   Future<void> openDestinationNavigation(Map<String, Object?> ride) async {
     if (ride['destinationAvailable'] != true) {
       Get.snackbar('الوجهة محمية', 'تظهر إحداثيات الوجهة بعد قبول العرض فقط.');
@@ -986,8 +1354,10 @@ class DriverController extends GetxController with WidgetsBindingObserver {
     await Get.toNamed<void>(DriverRoutes.navigation,
         arguments: <String, Object?>{
           'rideId': int.tryParse('${ride['id']}'),
-          'originLatitude': _number(ride['driverLatitude']),
-          'originLongitude': _number(ride['driverLongitude']),
+          'originLatitude': currentPosition.value?.latitude ??
+              _finiteNumber(ride['driverLatitude']),
+          'originLongitude': currentPosition.value?.longitude ??
+              _finiteNumber(ride['driverLongitude']),
           'destinationLatitude': lat,
           'destinationLongitude': lng,
           'title': title,
@@ -1031,9 +1401,161 @@ class DriverController extends GetxController with WidgetsBindingObserver {
     bool force = false,
   }) async {
     if (isClosed || !_session.isAuthenticated.value) return;
+    final age = DateTime.now().toUtc().difference(position.timestamp.toUtc());
+    if (age > const Duration(seconds: 30) ||
+        age < const Duration(seconds: -5) ||
+        !position.latitude.isFinite ||
+        !position.longitude.isFinite ||
+        position.latitude.abs() > 90 ||
+        position.longitude.abs() > 180 ||
+        !position.accuracy.isFinite ||
+        position.accuracy <= 0) return;
+    final previous = currentPosition.value;
+    if (previous != null && position.timestamp.isBefore(previous.timestamp)) {
+      return;
+    }
+    // Display the actual device fix even while Android provides approximate
+    // location. Only accurate fixes may enter the shared/financial route.
     currentPosition.value = position;
+    _updateTrackingActivity();
+    if (position.accuracy > 75) return;
     final driverId = _session.currentUserId.value;
-    if (driverId == null || _locationUpdateInFlight) return;
+    if (driverId == null) return;
+    final rideId = _activeTrackingRideId(driverId);
+    if (rideId != null && _routeOutbox != null) {
+      try {
+        // Persistence is independent of visual coalescing and a slow upload.
+        await _routeOutbox!
+            .record(driverId, rideId, _locationPayload(position));
+        final enabled = await _routeOutbox!.flush(driverId, rideId: rideId);
+        if (enabled) {
+          if (!isClosed && currentUserId == driverId) {
+            lastLocationSentAt.value = position.timestamp;
+          }
+          return;
+        }
+      } on Object catch (failure) {
+        routeRecordingError.value = '$failure';
+        return;
+      }
+    }
+    _pendingLivePosition =
+        (position: position, driverId: driverId, rideId: rideId);
+    if (_liveLocationRetry?.isActive == true) return;
+    await _flushLiveLocation(showMessage: showMessage, force: force);
+  }
+
+  void _retryLatestLocation() {
+    _liveLocationRetry?.cancel();
+    unawaited(_flushLiveLocation());
+  }
+
+  Future<void> _flushLiveLocation(
+      {bool showMessage = false, bool force = false}) async {
+    if (_locationUpdateInFlight) return;
+    _locationUpdateInFlight = true;
+    try {
+      while (_pendingLivePosition != null && !isClosed) {
+        final latest = _pendingLivePosition!;
+        _pendingLivePosition = null;
+        // A retry keeps the original account, ride and device timestamp. It
+        // must never attach an old fix to a different trip or logged-in user.
+        if (!_session.isAuthenticated.value ||
+            currentUserId != latest.driverId ||
+            _activeTrackingRideId(latest.driverId) != latest.rideId ||
+            DateTime.now()
+                    .toUtc()
+                    .difference(latest.position.timestamp.toUtc()) >
+                const Duration(seconds: 28)) continue;
+        final sent = await _sendLiveLocation(latest.position,
+            driverId: latest.driverId,
+            rideId: latest.rideId,
+            showMessage: showMessage,
+            force: force);
+        if (!sent) {
+          // Retain only the newest actual sample while transport recovers.
+          _pendingLivePosition ??= latest;
+          break;
+        }
+      }
+    } finally {
+      _locationUpdateInFlight = false;
+      if (!isClosed && _pendingLivePosition != null) {
+        _liveLocationRetry?.cancel();
+        _liveLocationRetry = Timer(const Duration(seconds: 3), () {
+          unawaited(_flushLiveLocation());
+        });
+      }
+    }
+  }
+
+  int? _activeTrackingRideId(int driverId) {
+    for (final ride in rides) {
+      if ('${ride['driverId'] ?? ''}' == '$driverId' &&
+          _trackableRideStatuses.contains(int.tryParse('${ride['status']}'))) {
+        return int.tryParse('${ride['id']}');
+      }
+    }
+    return null;
+  }
+
+  Map<String, Object?> _locationPayload(Position position) => {
+        'latitude': position.latitude,
+        'longitude': position.longitude,
+        'bearing': position.heading.isFinite && position.heading >= 0
+            ? position.heading % 360
+            : null,
+        'speed': position.speed.isFinite && position.speed >= 0
+            ? position.speed
+            : null,
+        'accuracy': position.accuracy,
+        'observedAtUtc': position.timestamp.toUtc().toIso8601String(),
+      };
+
+  void _updateTrackingActivity() {
+    final account = currentUserId;
+    final rideId = account == null ? null : _activeTrackingRideId(account);
+    final viewed = rideId != null &&
+        _viewedRideId == rideId &&
+        (_viewedUntil?.isAfter(DateTime.now().toUtc()) ?? false);
+    unawaited(_locationTracker?.setActivity(
+            activeRide: rideId != null,
+            viewed: viewed,
+            moving: (currentPosition.value?.speed ?? 0) > 1.2,
+            available: profile.value?['acceptsNewRequests'] != false) ??
+        Future<void>.value());
+  }
+
+  Future<void> _flushRouteSamples() async {
+    final account = currentUserId;
+    if (_routeOutbox == null || account == null) return;
+    try {
+      final activeRide = _activeTrackingRideId(account);
+      if (activeRide != null)
+        await _routeOutbox!.flush(account, rideId: activeRide);
+      await _routeOutbox!.flush(account);
+    } on Object {
+      // IDs and timestamps remain in SQLite until a later confirmed retry.
+    }
+  }
+
+  Future<void> ensureRouteSamplesSaved(int rideId) async {
+    final account = currentUserId;
+    if (_routeOutbox != null && account != null) {
+      await _routeOutbox!.requireSaved(account, rideId);
+    }
+  }
+
+  Future<bool> _sendLiveLocation(Position position,
+      {required int driverId,
+      required int? rideId,
+      required bool showMessage,
+      required bool force}) async {
+    if (driverId != currentUserId ||
+        !_session.isAuthenticated.value ||
+        isClosed) return false;
+    if (DateTime.now().toUtc().difference(position.timestamp.toUtc()) >
+        const Duration(seconds: 28)) return false;
     final previous = _lastSentPosition;
     final lastUpdate = _lastLocationSentAt;
     final movedMeters = previous == null
@@ -1045,61 +1567,48 @@ class DriverController extends GetxController with WidgetsBindingObserver {
             position.longitude,
           );
     if (!force &&
+        _lastSentRideId == rideId &&
         lastUpdate != null &&
         DateTime.now().difference(lastUpdate) < const Duration(seconds: 2) &&
         movedMeters < 5) {
-      return;
+      return false;
     }
 
     if (!position.accuracy.isFinite ||
         position.accuracy <= 0 ||
         position.accuracy > 75) {
-      return;
+      return false;
     }
 
-    _locationUpdateInFlight = true;
     try {
-      Map<String, Object?>? activeRide;
-      for (final ride in rides) {
-        if ('${ride['driverId'] ?? ''}' == '$driverId' &&
-            <int>{3, 4, 5, 8, 9}.contains(int.tryParse('${ride['status']}'))) {
-          activeRide = ride;
-          break;
-        }
-      }
       final hub = Get.isRegistered<TrackingHubService>()
           ? Get.find<TrackingHubService>()
           : null;
-      if (hub == null) return;
+      if (hub == null) return false;
       final sent = await hub.publishDriverLocation(<String, Object?>{
-        'rideId':
-            activeRide == null ? null : int.tryParse('${activeRide['id']}'),
-        'latitude': position.latitude,
-        'longitude': position.longitude,
-        'bearing': position.heading.isFinite && position.heading >= 0
-            ? position.heading % 360
-            : null,
-        'speed': position.speed.isFinite && position.speed >= 0
-            ? position.speed
-            : null,
-        'accuracy': position.accuracy,
-        'observedAtUtc': position.timestamp.toUtc().toIso8601String(),
+        'rideId': rideId,
+        ..._locationPayload(position),
       });
-      if (!sent) return;
+      if (!sent) return false;
+      if (isClosed ||
+          currentUserId != driverId ||
+          !_session.isAuthenticated.value ||
+          _activeTrackingRideId(driverId) != rideId) return true;
       _lastLocationSentAt = DateTime.now();
       if (!isClosed) lastLocationSentAt.value = _lastLocationSentAt;
       _lastSentPosition = position;
+      _lastSentRideId = rideId;
       if (showMessage) {
         Get.snackbar('تم تحديث الموقع', 'تم إرسال موقعك الحقيقي الحالي.');
       }
-    } finally {
-      _locationUpdateInFlight = false;
+      return true;
+    } on Object {
+      return false;
     }
   }
 
   Future<void> signOut() async {
     await _session.signOut();
-    Get.offAllNamed<void>(DriverRoutes.login);
   }
 
   int get unreadNotifications =>
@@ -1284,13 +1793,23 @@ class DriverController extends GetxController with WidgetsBindingObserver {
 
   @override
   void onClose() {
+    _legacyRefreshTimer?.cancel();
+    _eventsReceivedDuringRefresh.clear();
+    if (identical(_session.onNotificationOpened, _notificationOpenedHandler)) {
+      _session.onNotificationOpened = null;
+    }
     WidgetsBinding.instance.removeObserver(this);
     _automaticSyncTimer?.cancel();
+    _routeRetry?.cancel();
+    _liveLocationRetry?.cancel();
+    _pendingLivePosition = null;
     unawaited(_locationTracker?.stop() ?? Future<void>.value());
     _hubEventSubscription?.cancel();
     _hubConnectionSubscription?.cancel();
+    _apiRecoverySubscription?.cancel();
     passengerLocationsByRideId.clear();
     if (Get.isRegistered<TrackingHubService>()) {
+      Get.find<TrackingHubService>().stateChanges.unregister(this);
       unawaited(
         Get.find<TrackingHubService>().setUserEventListening(this, false),
       );

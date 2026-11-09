@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../lib/core/realtime/tracking_hub_service.dart';
+import '../lib/core/realtime/state_change_coordinator.dart';
 import '../lib/core/storage/secure_storage_service.dart';
 import '../lib/features/driver/repositories/driver_repository.dart';
 import '../lib/features/driver/views/driver_payment_view.dart';
@@ -87,6 +88,39 @@ Future<void> collect(WidgetTester tester) async {
 }
 
 void main() {
+  testWidgets('GPS does not fetch payment; durable ride invalidation does',
+      (tester) async {
+    final repository = PaymentRepository();
+    final hub = PaymentHub();
+    await tester.pumpWidget(MaterialApp(home: DriverPaymentView(
+        ride: ride(), repository: repository, hub: hub)));
+    await tester.pumpAndSettle();
+    final before = repository.detailReads;
+    for (final name in ['driverLocationUpdated', 'passengerLocationUpdated',
+      'nearbyDriverLocationUpdated', 'rideMessageCreated']) {
+      hub.messages.add(TrackingHubEvent(name, {'rideId': 7}));
+    }
+    await tester.pump();
+    expect(repository.detailReads, before);
+    final recovery = hub.stateChanges.recover((_, __) async => {
+      'supported': true, 'events': [], 'hasMore': false,
+    });
+    await tester.pumpAndSettle();
+    await recovery;
+    repository.latest = ride(waitingFee: 50);
+    hub.stateChanges.observe(const StateChange('ride:7', 1, 'ride', 7));
+    await tester.pumpAndSettle();
+    expect(repository.detailReads, before + 1);
+    expect(hub.stateChanges.versions['ride:7'], 1);
+    repository.fail = true;
+    hub.stateChanges.observe(const StateChange('ride:7', 2, 'ride', 7));
+    await tester.pumpAndSettle();
+    expect(hub.stateChanges.versions['ride:7'], 1,
+        reason: 'A failed fare fetch must remain unacknowledged.');
+    await tester.pumpWidget(const SizedBox());
+    hub.stateChanges.dispose();
+    await hub.messages.close();
+  });
   setUp(() {
     final view = TestWidgetsFlutterBinding.instance.platformDispatcher.views.single;
     view.physicalSize = const Size(900, 1800);

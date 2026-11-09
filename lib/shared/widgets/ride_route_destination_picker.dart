@@ -5,6 +5,7 @@ import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 import '../models/ride_route_change_snapshot.dart';
 import 'app_google_map.dart';
+import 'live_tracking_marker_icons.dart';
 
 /// An isolated selector: search/taps only edit this screen's draft destination.
 class RideRouteDestinationPicker extends StatefulWidget {
@@ -35,6 +36,23 @@ class _RideRouteDestinationPickerState
   bool _searching = false;
   bool _resolving = false;
   String? _error;
+  BitmapDescriptor? _destinationIcon;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_loadMarkerIcon());
+  }
+
+  Future<void> _loadMarkerIcon() async {
+    try {
+      final icon = await LiveTrackingMarkerIcons.buildStop(
+          destination: true, label: 'الوجهة');
+      if (mounted) setState(() => _destinationIcon = icon);
+    } on Object {
+      // The selected coordinate remains usable with the native fallback.
+    }
+  }
 
   void _scheduleSearch(String value) {
     _debounce?.cancel();
@@ -146,7 +164,12 @@ class _RideRouteDestinationPickerState
                 if (_point != null)
                   Marker(
                       markerId: const MarkerId('proposed_destination'),
-                      position: _point!)
+                      position: _point!,
+                      anchor: LiveTrackingMarkerIcons.stopAnchor,
+                      icon: _destinationIcon ??
+                          BitmapDescriptor.defaultMarkerWithHue(
+                              BitmapDescriptor.hueAzure),
+                      infoWindow: const InfoWindow(title: 'الوجهة'))
               },
             )),
             if (_results.isNotEmpty)

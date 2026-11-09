@@ -9,19 +9,25 @@ import 'package:yemen_drive_driver/core/storage/secure_storage_service.dart';
 
 class _Storage extends SecureStorageService {
   @override
-  Future<String?> get accessToken async => null;
+  Future<String?> get accessToken async => 'test-driver-access';
 }
 
 class _Adapter implements HttpClientAdapter {
   RequestOptions? request;
   bool reject = false;
+  bool invalidAcknowledgement = false;
   @override
   Future<ResponseBody> fetch(RequestOptions options, Stream<Uint8List>? stream,
       Future<void>? cancel) async {
     request = options;
-    return ResponseBody.fromString('{}', reject ? 400 : 200, headers: {
-      Headers.contentTypeHeader: ['application/json']
-    });
+    return ResponseBody.fromString(
+        invalidAcknowledgement
+            ? '{}'
+            : '{"success":true,"data":{"accepted":true}}',
+        reject ? 400 : 200,
+        headers: {
+          Headers.contentTypeHeader: ['application/json']
+        });
   }
 
   @override
@@ -52,6 +58,11 @@ void main() {
     adapter.reject = true;
     expect(await hub.publishDriverLocation(payload), false,
         reason: 'Rejected GPS must not be shown as successfully sent.');
+    adapter.reject = false;
+    adapter.invalidAcknowledgement = true;
+    expect(await hub.publishDriverLocation(payload), false,
+        reason:
+            'A proxy HTML/empty success response is not a GPS acknowledgement.');
     await hub.disconnect();
   });
 }

@@ -1,7 +1,7 @@
 class AppEnvironment {
   AppEnvironment._();
   static const defaultBaseUrl = String.fromEnvironment('API_BASE_URL',
-      defaultValue: 'http://192.168.89.72:5080/api');
+      defaultValue: 'http://yemen-drive.ertiqasoft.net/api');
 
   static late final String baseUrl;
   static String defaultCurrency = 'ر.ي';

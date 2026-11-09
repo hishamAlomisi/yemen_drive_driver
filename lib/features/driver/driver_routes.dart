@@ -19,7 +19,7 @@ final List<GetPage<dynamic>> driverPages = <GetPage<dynamic>>[
   GetPage<dynamic>(
     name: DriverRoutes.login,
     page: DriverLoginView.new,
-    binding: DriverBinding(),
+    binding: DriverLoginBinding(),
   ),
   GetPage<dynamic>(
     name: DriverRoutes.home,

@@ -6,6 +6,8 @@ import 'package:get/get.dart';
 
 import '../../core/network/api_client.dart';
 import '../../core/network/api_models.dart';
+import '../../core/realtime/realtime_state_binding.dart';
+import '../../features/driver/controllers/driver_controller.dart';
 import '../models/ride_route_change_snapshot.dart';
 import 'ride_financial_follow_up.dart';
 
@@ -38,6 +40,7 @@ class _RideRouteChangePanelState extends State<RideRouteChangePanel>
   RideRouteChangeSnapshot? _snapshot;
   final Stopwatch _elapsed = Stopwatch();
   Timer? _timer;
+  RealtimeStateBinding? _stateBinding;
   bool _loading = false;
   bool _busy = false;
   bool _reviewing = false;
@@ -55,10 +58,18 @@ class _RideRouteChangePanelState extends State<RideRouteChangePanel>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _stateBinding = RealtimeStateBinding(
+        owner: this,
+        resources: const {'ride'},
+        accepts: (change) =>
+            change.resource == 'ride' && change.resourceId == widget.rideId,
+        refresh: () => _refresh(requireSuccess: true));
     unawaited(_refresh());
     _timer = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (!mounted || _paused) return;
-      if (++_ticks % 5 == 0) unawaited(_refresh());
+      if (!mounted || _paused || !TickerMode.valuesOf(context).enabled) return;
+      if (++_ticks % 5 == 0 && _stateBinding?.synchronized != true) {
+        unawaited(_refresh());
+      }
       if (_snapshot?.request?.isOpen == true) setState(() {});
     });
   }
@@ -88,12 +99,19 @@ class _RideRouteChangePanelState extends State<RideRouteChangePanel>
     if (!_paused) unawaited(_refresh());
   }
 
-  bool get _stale => _error != null || _elapsed.elapsed.inSeconds >= 15;
+  bool get _stale =>
+      _error != null ||
+      (_elapsed.elapsed.inSeconds >= 15 && _stateBinding?.synchronized != true);
   DateTime get _serverNow => _snapshot!.serverNowUtc.add(_elapsed.elapsed);
 
   Future<RideRouteChangeSnapshot> _call(String operation,
       {int? requestId, RideRouteDestination? destination}) async {
     final rideId = widget.rideId;
+    if (operation != 'get' &&
+        widget.isDriver &&
+        Get.isRegistered<DriverController>()) {
+      await Get.find<DriverController>().ensureRouteSamplesSaved(rideId);
+    }
     final result = await Get.find<ApiClient>().execute<Object?>(
       model: 'RideRouteChangeModel',
       operation: operation,
@@ -155,19 +173,28 @@ class _RideRouteChangePanelState extends State<RideRouteChangePanel>
     }
   }
 
-  Future<void> _refresh() async {
-    if (_loading || _busy || _paused) return;
+  Future<void> _refresh({bool requireSuccess = false}) async {
+    if (_loading || _busy || _paused) {
+      if (requireSuccess) throw StateError('Route refresh is in progress');
+      return;
+    }
     _loading = true;
     final generation = _generation;
+    final epoch = _stateBinding?.epoch;
     try {
       final value = await _call('get');
+      if (epoch != null) _stateBinding?.verify(epoch);
       if (mounted && generation == _generation) await _apply(value);
+      if (requireSuccess && _error != null) throw StateError(_error!);
     } catch (error) {
-      if (mounted && generation == _generation) {
+      if (mounted &&
+          generation == _generation &&
+          error is! StateSnapshotSuperseded) {
         setState(() => _error = error is FormatException
             ? error.message
             : 'تعذرت مزامنة تغيير الوجهة. تحقق من الاتصال وأعد المحاولة.');
       }
+      if (requireSuccess) rethrow;
     } finally {
       if (generation == _generation) _loading = false;
     }
@@ -384,6 +411,7 @@ class _RideRouteChangePanelState extends State<RideRouteChangePanel>
 
   @override
   void dispose() {
+    _stateBinding?.dispose();
     ++_generation;
     WidgetsBinding.instance.removeObserver(this);
     _timer?.cancel();

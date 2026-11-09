@@ -209,7 +209,7 @@ void main() {
   });
 
   testWidgets(
-      'route approval opens inside its notification and waiting requests have an entry',
+      'route approval opens inside its notification and waiting has an entry',
       (tester) async {
     final subject = Get.put<DriverController>(controller(_Repository()));
     final api = Get.put<ApiClient>(RouteApi()) as RouteApi;
@@ -225,7 +225,7 @@ void main() {
       },
       {
         'id': 13,
-        'title': 'طلب توقف أثناء الرحلة',
+        'title': 'بدأ التوقف أثناء الرحلة',
         'body': 'راجع سياسة الانتظار',
         'isRead': false,
         'dataJson': '{"rideId":7,"action":"review_waiting"}'
@@ -234,7 +234,7 @@ void main() {
     await tester
         .pumpWidget(const GetMaterialApp(home: DriverNotificationsView()));
     await tester.pumpAndSettle();
-    expect(find.text('مراجعة طلب الانتظار'), findsOneWidget);
+    expect(find.text('متابعة التوقف والانتظار'), findsOneWidget);
     await tester.tap(find.text('مراجعة طلب تغيير المسار'));
     await tester.pumpAndSettle();
     expect(find.text('مراجعة الفاتورة والموافقة'), findsOneWidget);

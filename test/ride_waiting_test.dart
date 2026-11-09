@@ -13,7 +13,8 @@ import '../lib/shared/widgets/ride_waiting_panel.dart';
 Map<String, Object?> snapshot({
   bool open = false,
   bool started = false,
-  bool mine = false,
+  String? pendingKey,
+  String? decision,
   int id = 10,
   String now = '2026-10-19T10:01:30.500Z',
   double settled = 100,
@@ -31,9 +32,12 @@ Map<String, Object?> snapshot({
       'serviceFee': 100,
       'totalAmount': 1100 + fee,
       'connectionDeadlineUtc': deadline,
-      'canRequest': !open,
-      'canDecide': open && !started && !mine,
-      'requestedByMe': mine,
+      'controlMode': 'driver',
+      'canStart': !open,
+      'canResume': open && started,
+      'canRequestResume': false,
+      'canDecideResume': pendingKey != null && decision == null,
+      'resumeRequestPending': pendingKey != null && decision == null,
       'session': {
         'id': id,
         'isOpen': open,
@@ -43,6 +47,11 @@ Map<String, Object?> snapshot({
         'pricePerMinute': 60,
         'maxFee': 50,
         'fee': fee - settled,
+        if (pendingKey != null)
+          'resumeRequest': {
+            'requestKey': pendingKey,
+            'decision': decision,
+          },
       },
     };
 
@@ -79,7 +88,7 @@ Future<void> mount(WidgetTester tester,
 }
 
 void main() {
-  test('pending consent has no running clock or new charges', () {
+  test('legacy unstarted session cannot invent a clock or new charges', () {
     final value = RideWaitingSnapshot(snapshot(open: true, fee: 100));
     expect(value.elapsedSeconds(const Duration(minutes: 1)), 0);
     expect(value.waitingFee(const Duration(minutes: 1)), 100);
@@ -129,179 +138,289 @@ void main() {
   });
 
   tearDown(Get.reset);
+  const request = '00000000-0000-4000-8000-000000000001';
+  const replacement = '00000000-0000-4000-8000-000000000002';
 
-  testWidgets('driver request waits for consent, then resumes and settles',
+  void noConsent() {
+    for (final label in [
+      'توقف بطلب الراكب',
+      'طلب انتظار بانتظار الموافقة',
+      'مراجعة وموافقة',
+      'أوافق على بدء الانتظار',
+      'إرسال الطلب',
+      'سحب طلب الانتظار'
+    ]) {
+      expect(find.text(label), findsNothing);
+    }
+    expect(find.byType(AlertDialog), findsNothing);
+  }
+
+  test('resume decisions need an active stop and specific pending request', () {
+    final pending = RideWaitingSnapshot(
+        snapshot(open: true, started: true, pendingKey: request));
+    expect(pending.resumeRequestPending, isTrue);
+    expect(pending.resumeRequestKey, request);
+    expect(
+        RideWaitingSnapshot(snapshot(
+                open: true,
+                started: true,
+                pendingKey: request,
+                decision: 'rejected'))
+            .resumeRequestPending,
+        isFalse);
+    expect(
+        RideWaitingSnapshot(snapshot(pendingKey: request)).resumeRequestPending,
+        isFalse);
+    final legacy = RideWaitingSnapshot(snapshot()..['controlMode'] = 'consent');
+    expect(legacy.canStart, isFalse);
+  });
+
+  testWidgets('driver starts waiting immediately without consent',
       (tester) async {
     final api = Get.put<ApiClient>(FakeWaitingApi()) as FakeWaitingApi;
     var state = snapshot(fee: 100);
-    api.handle = (operation, body) async {
-      if (operation == 'add') {
+    api.handle = (action, body) async {
+      if (action == 'start') {
         expect(body['rideId'], 7);
+        expect(body.containsKey('sessionId'), isFalse);
         expect(
             body['requestKey'],
             matches(RegExp(
-              r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
-            )));
-        state = snapshot(open: true, mine: true, fee: 100);
+                r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')));
+        state = snapshot(open: true, started: true);
       }
-      if (operation == 'update') {
+      return state;
+    };
+    await mount(tester);
+    await tester.tap(find.text('بدء التوقف'));
+    await tester.pumpAndSettle();
+    expect(api.calls.where((c) => c.$1 == 'start'), hasLength(1));
+    expect(find.text('الرحلة متوقفة'), findsOneWidget);
+    expect(find.text('1:30'), findsOneWidget);
+    expect(find.text('استئناف الرحلة وإيقاف الانتظار'), findsOneWidget);
+    noConsent();
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('driver directly resumes without accepting rider request',
+      (tester) async {
+    final api = Get.put<ApiClient>(FakeWaitingApi()) as FakeWaitingApi;
+    var state = snapshot(open: true, started: true, pendingKey: request);
+    api.handle = (action, body) async {
+      if (action == 'resume') {
         expect(body['sessionId'], 10);
+        expect(body.containsKey('resumeRequestKey'), isFalse);
         state = snapshot(settled: 131);
       }
       return state;
     };
     await mount(tester);
-    await tester.tap(find.text('توقف بطلب الراكب'));
-    await tester.pumpAndSettle();
-    expect(api.calls.where((c) => c.$1 == 'add'), isEmpty);
-    await tester.tap(find.text('إرسال الطلب'));
-    await tester.pumpAndSettle();
-    expect(find.text('طلب انتظار بانتظار الموافقة'), findsOneWidget);
-    expect(find.text('استئناف الرحلة وإيقاف الانتظار'), findsNothing);
-    state = snapshot(open: true, started: true, mine: true);
-    await tester.pump(const Duration(seconds: 5));
-    await tester.pumpAndSettle();
-    expect(find.text('1:30'), findsOneWidget);
     await tester.tap(find.text('استئناف الرحلة وإيقاف الانتظار'));
     await tester.pumpAndSettle();
+    expect(api.calls.where((c) => c.$1 == 'resume'), hasLength(1));
+    expect(api.calls.where((c) => c.$1 == 'accept_resume'), isEmpty);
     expect(find.text('الإجمالي الحالي: 1231 ر.ي'), findsOneWidget);
-    expect(api.calls.where((c) => c.$1 == 'update'), hasLength(1));
+    expect(find.text('1:30'), findsNothing);
+    noConsent();
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
-  testWidgets('recipient consent starts waiting and passenger cannot resume',
+  for (final accept in [true, false]) {
+    testWidgets(
+        accept
+            ? 'accept rider resume and end waiting'
+            : 'reject rider resume and keep waiting running', (tester) async {
+      final api = Get.put<ApiClient>(FakeWaitingApi()) as FakeWaitingApi;
+      var state = snapshot(open: true, started: true, pendingKey: request);
+      final action = accept ? 'accept_resume' : 'reject_resume';
+      api.handle = (operation, body) async {
+        if (operation == action) {
+          expect(body['sessionId'], 10);
+          expect(body['resumeRequestKey'], request);
+          state = accept
+              ? snapshot(settled: 131)
+              : snapshot(
+                  open: true,
+                  started: true,
+                  pendingKey: request,
+                  decision: 'rejected');
+        }
+        return state;
+      };
+      await mount(tester);
+      await tester
+          .tap(find.text(accept ? 'قبول طلب الاستئناف' : 'رفض طلب الاستئناف'));
+      await tester.pumpAndSettle();
+      expect(api.calls.where((c) => c.$1 == action), hasLength(1));
+      expect(find.text('قبول طلب الاستئناف'), findsNothing);
+      expect(find.text('1:30'), accept ? findsNothing : findsOneWidget);
+      expect(find.text('استئناف الرحلة وإيقاف الانتظار'),
+          accept ? findsNothing : findsOneWidget);
+      noConsent();
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+  }
+
+  testWidgets('rider role cannot execute driver stop or resume decisions',
       (tester) async {
     final api = Get.put<ApiClient>(FakeWaitingApi()) as FakeWaitingApi;
-    var state = snapshot(open: true, fee: 100);
-    api.handle = (operation, body) async {
-      if (operation == 'accept') {
-        expect(body['sessionId'], 10);
-        state = snapshot(open: true, started: true);
-      }
-      return state;
-    };
+    api.handle = (_, __) async =>
+        snapshot(open: true, started: true, pendingKey: request);
     await mount(tester, driver: false);
-    await tester.tap(find.text('مراجعة وموافقة'));
+    for (final text in [
+      'بدء التوقف',
+      'استئناف الرحلة وإيقاف الانتظار',
+      'قبول طلب الاستئناف',
+      'رفض طلب الاستئناف'
+    ]) {
+      expect(find.text(text), findsNothing);
+    }
+    noConsent();
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('server guards and old flags never expose stop consent',
+      (tester) async {
+    final api = Get.put<ApiClient>(FakeWaitingApi()) as FakeWaitingApi;
+    api.handle = (_, __) async => snapshot()
+      ..addAll({'canStart': false, 'canRequest': true, 'canDecide': true});
+    await mount(tester);
+    expect(find.text('بدء التوقف'), findsNothing);
+    noConsent();
+    api.handle = (_, __) async => snapshot()
+      ..addAll(
+          {'controlMode': 'consent', 'canRequest': true, 'canDecide': true});
+    await tester.pump(const Duration(seconds: 5));
     await tester.pumpAndSettle();
-    expect(api.calls.where((c) => c.$1 == 'accept'), isEmpty);
-    await tester.tap(find.text('أوافق على بدء الانتظار'));
+    expect(find.text('بدء التوقف'), findsNothing);
+    noConsent();
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('uncertain start retries with the same idempotency key',
+      (tester) async {
+    final api = Get.put<ApiClient>(FakeWaitingApi()) as FakeWaitingApi;
+    api.handle = (action, _) async {
+      if (action == 'start') throw StateError('connection lost');
+      return snapshot(fee: 100);
+    };
+    await mount(tester);
+    for (var attempt = 0; attempt < 2; attempt++) {
+      await tester.tap(find.text('بدء التوقف'));
+      await tester.pumpAndSettle();
+    }
+    final starts = api.calls.where((c) => c.$1 == 'start').toList();
+    expect(starts, hasLength(2));
+    expect(starts[0].$2['requestKey'], starts[1].$2['requestKey']);
+    noConsent();
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('double taps cannot create two stop operations', (tester) async {
+    final api = Get.put<ApiClient>(FakeWaitingApi()) as FakeWaitingApi;
+    final start = Completer<Map<String, Object?>>();
+    api.handle = (action, _) =>
+        action == 'start' ? start.future : Future.value(snapshot(fee: 100));
+    await mount(tester);
+    await tester.tap(find.text('بدء التوقف'));
+    await tester.tap(find.text('بدء التوقف'));
+    expect(api.calls.where((c) => c.$1 == 'start'), hasLength(1));
+    start.complete(snapshot(open: true, started: true));
+    await tester.pumpAndSettle();
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('read begun before start cannot replace its active result',
+      (tester) async {
+    final api = Get.put<ApiClient>(FakeWaitingApi()) as FakeWaitingApi;
+    Completer<Map<String, Object?>>? read;
+    var state = snapshot(fee: 100);
+    api.handle = (action, _) async {
+      if (action == 'start') return state = snapshot(open: true, started: true);
+      return read?.future ?? Future.value(state);
+    };
+    await mount(tester);
+    read = Completer<Map<String, Object?>>();
+    await tester.pump(const Duration(seconds: 5));
+    await tester.tap(find.text('بدء التوقف'));
+    await tester.pumpAndSettle();
+    read.complete(snapshot(fee: 100));
     await tester.pumpAndSettle();
     expect(find.text('1:30'), findsOneWidget);
-    expect(find.text('استئناف الرحلة وإيقاف الانتظار'), findsNothing);
+    expect(find.text('بدء التوقف'), findsNothing);
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
-  testWidgets('approval dialog cannot approve a replacement session',
+  testWidgets('previous ride reply cannot replace current waiting state',
       (tester) async {
     final api = Get.put<ApiClient>(FakeWaitingApi()) as FakeWaitingApi;
-    var state = snapshot(open: true, fee: 100);
-    api.handle = (_, body) async => state;
-    await mount(tester);
-    await tester.tap(find.text('مراجعة وموافقة'));
-    await tester.pumpAndSettle();
-    state = snapshot(open: true, id: 11, fee: 100);
-    await tester.pump(const Duration(seconds: 5));
-    await tester.pump();
-    await tester.tap(find.text('أوافق على بدء الانتظار'));
-    await tester.pumpAndSettle();
-    expect(api.calls.where((c) => c.$1 == 'accept'), isEmpty);
-    expect(
-        find.text('تغيرت حالة الانتظار. راجع الحالة المحدثة.'), findsOneWidget);
-    await tester.pumpWidget(const SizedBox.shrink());
-  });
-
-  testWidgets('late reply for previous ride is ignored', (tester) async {
-    final api = Get.put<ApiClient>(FakeWaitingApi()) as FakeWaitingApi;
     final old = Completer<Map<String, Object?>>();
-    api.handle = (_, body) => body['rideId'] == 7
-        ? old.future
-        : Future.value(snapshot(open: true, mine: true, fee: 100));
+    api.handle = (_, body) =>
+        body['rideId'] == 7 ? old.future : Future.value(snapshot(fee: 100));
     await mount(tester);
     await mount(tester, rideId: 8);
     old.complete(snapshot(open: true, started: true));
     await tester.pumpAndSettle();
-    expect(find.text('طلب انتظار بانتظار الموافقة'), findsOneWidget);
+    expect(find.text('بدء التوقف'), findsOneWidget);
     expect(find.text('1:30'), findsNothing);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('replacement resume request requires a new matching key',
+      (tester) async {
+    final api = Get.put<ApiClient>(FakeWaitingApi()) as FakeWaitingApi;
+    var state = snapshot(open: true, started: true, pendingKey: request);
+    api.handle = (action, body) async {
+      if (action == 'accept_resume' && body['resumeRequestKey'] == request) {
+        state = snapshot(open: true, started: true, pendingKey: replacement);
+        throw const FormatException('تغير طلب الاستئناف. راجع الطلب الحالي.');
+      }
+      if (action == 'accept_resume') {
+        expect(body['resumeRequestKey'], replacement);
+        state = snapshot(settled: 131);
+      }
+      return state;
+    };
+    await mount(tester);
+    await tester.tap(find.text('قبول طلب الاستئناف'));
+    await tester.pumpAndSettle();
+    expect(find.text('1:30'), findsOneWidget);
+    await tester.tap(find.text('قبول طلب الاستئناف'));
+    await tester.pumpAndSettle();
+    expect(
+        api.calls
+            .where((c) => c.$1 == 'accept_resume')
+            .map((c) => c.$2['resumeRequestKey']),
+        [request, replacement]);
+    expect(find.text('1:30'), findsNothing);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('direct resume remains available after refresh failure',
+      (tester) async {
+    final api = Get.put<ApiClient>(FakeWaitingApi()) as FakeWaitingApi;
+    var failRead = false;
+    api.handle = (action, _) async {
+      if (action == 'resume') return snapshot(settled: 131);
+      if (failRead) throw StateError('offline');
+      return snapshot(open: true, started: true);
+    };
+    await mount(tester);
+    failRead = true;
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('استئناف الرحلة وإيقاف الانتظار'));
+    await tester.pumpAndSettle();
+    expect(api.calls.where((c) => c.$1 == 'resume'), hasLength(1));
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
   testWidgets('invalid response offers retry without crashing', (tester) async {
     final api = Get.put<ApiClient>(FakeWaitingApi()) as FakeWaitingApi;
-    api.handle = (_, body) async => {};
+    api.handle = (_, __) async => {};
     await mount(tester);
     expect(find.text('تعذرت مزامنة الانتظار. أعد المحاولة.'), findsOneWidget);
     expect(tester.takeException(), isNull);
-    await tester.pumpWidget(const SizedBox.shrink());
-  });
-
-  for (final mine in [true, false]) {
-    testWidgets(
-        mine
-            ? 'requester can withdraw without fees'
-            : 'recipient can reject without fees', (tester) async {
-      final api = Get.put<ApiClient>(FakeWaitingApi()) as FakeWaitingApi;
-      var state = snapshot(open: true, mine: mine, fee: 100);
-      final operation = mine ? 'cancel' : 'reject';
-      api.handle = (action, body) async {
-        if (action == operation) {
-          expect(body['sessionId'], 10);
-          state = snapshot(fee: 100);
-        }
-        return state;
-      };
-      await mount(tester);
-      await tester.tap(find.text(mine ? 'سحب طلب الانتظار' : 'رفض'));
-      await tester.pumpAndSettle();
-      expect(api.calls.where((c) => c.$1 == operation), hasLength(1));
-      expect(find.text('طلب انتظار بانتظار الموافقة'), findsNothing);
-      expect(find.text('الإجمالي الحالي: 1200 ر.ي'), findsOneWidget);
-      await tester.pumpWidget(const SizedBox.shrink());
-    });
-  }
-
-  testWidgets('an uncertain request retries with the same idempotency key',
-      (tester) async {
-    final api = Get.put<ApiClient>(FakeWaitingApi()) as FakeWaitingApi;
-    api.handle = (action, body) async {
-      if (action == 'add') throw StateError('connection lost');
-      return snapshot(fee: 100);
-    };
-    await mount(tester);
-    for (var attempt = 0; attempt < 2; attempt++) {
-      await tester.tap(find.text('توقف بطلب الراكب'));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('إرسال الطلب'));
-      await tester.pumpAndSettle();
-    }
-    final calls = api.calls.where((c) => c.$1 == 'add').toList();
-    expect(calls, hasLength(2));
-    expect(calls[0].$2['requestKey'], calls[1].$2['requestKey']);
-    await tester.pumpWidget(const SizedBox.shrink());
-  });
-
-  testWidgets('a read started before acceptance cannot replace its result',
-      (tester) async {
-    final api = Get.put<ApiClient>(FakeWaitingApi()) as FakeWaitingApi;
-    var state = snapshot(open: true, fee: 100);
-    Completer<Map<String, Object?>>? read;
-    api.handle = (action, body) async {
-      if (action == 'accept') {
-        state = snapshot(open: true, started: true);
-        return state;
-      }
-      return read == null ? state : read.future;
-    };
-    await mount(tester);
-    read = Completer<Map<String, Object?>>();
-    await tester.pump(const Duration(seconds: 5));
-    await tester.tap(find.text('مراجعة وموافقة'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('أوافق على بدء الانتظار'));
-    await tester.pumpAndSettle();
-    read.complete(snapshot(open: true, fee: 100));
-    await tester.pumpAndSettle();
-    expect(find.text('1:30'), findsOneWidget);
-    expect(find.text('طلب انتظار بانتظار الموافقة'), findsNothing);
     await tester.pumpWidget(const SizedBox.shrink());
   });
 }

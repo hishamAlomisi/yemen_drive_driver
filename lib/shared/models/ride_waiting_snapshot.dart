@@ -1,6 +1,6 @@
 import 'dart:math' as math;
 
-/// A display projection of a server-approved waiting session, never a charge.
+/// A display projection of a server-confirmed waiting session, never a charge.
 class RideWaitingSnapshot {
   RideWaitingSnapshot(this.data) {
     if (date(data['serverNowUtc']) == null) {
@@ -14,6 +14,25 @@ class RideWaitingSnapshot {
       : const {};
   bool get isOpen => session['isOpen'] == true;
   bool get isActive => isOpen && date(session['startedAtUtc']) != null;
+  bool get isDriverControlled => data['controlMode'] == 'driver';
+  bool get canStart => isDriverControlled && data['canStart'] == true;
+  bool get canResume => isDriverControlled && data['canResume'] == true;
+  bool get canRequestResume =>
+      isDriverControlled && data['canRequestResume'] == true;
+  bool get canDecideResume =>
+      isDriverControlled && data['canDecideResume'] == true;
+  Map<String, Object?> get resumeRequest => session['resumeRequest'] is Map
+      ? Map<String, Object?>.from(session['resumeRequest'] as Map)
+      : const {};
+  bool get resumeRequestPending =>
+      isActive &&
+      data['resumeRequestPending'] == true &&
+      resumeRequest['decision'] == null &&
+      resumeRequestKey != null;
+  String? get resumeRequestKey {
+    final value = resumeRequest['requestKey'];
+    return value is String && value.trim().isNotEmpty ? value : null;
+  }
 
   static double number(Object? raw) {
     final value = raw is num ? raw.toDouble() : double.tryParse('$raw');

@@ -11,17 +11,27 @@ import '../driver_routes.dart';
 class DriverNotificationsView extends GetView<DriverController> {
   const DriverNotificationsView({super.key});
 
+  void _returnHome() {
+    // Keep the route that owns the live driver controller while leaving
+    // notifications. Replacing the whole stack can dispose that controller.
+    var foundHome = false;
+    Get.until((route) {
+      foundHome = route.settings.name == DriverRoutes.home;
+      return foundHome || route.isFirst;
+    });
+    if (!foundHome) Get.toNamed<void>(DriverRoutes.home);
+  }
+
   @override
   Widget build(BuildContext context) => PopScope(
         canPop: false,
         onPopInvokedWithResult: (didPop, result) {
-          if (!didPop) Get.offAllNamed<void>(DriverRoutes.home);
+          if (!didPop) _returnHome();
         },
         child: Scaffold(
           appBar: AppBar(
               title: const Text('الإشعارات'),
-              leading: BackButton(
-                  onPressed: () => Get.offAllNamed<void>(DriverRoutes.home))),
+              leading: BackButton(onPressed: _returnHome)),
           body: Obx(() => RefreshIndicator(
                 onRefresh: () => controller.load(showLoading: false),
                 child: ListView(
@@ -260,7 +270,7 @@ class _NotificationCardState extends State<_NotificationCard> {
                 TextButton(
                     onPressed: () =>
                         setState(() => _showWaiting = !_showWaiting),
-                    child: const Text('مراجعة طلب الانتظار')),
+                    child: const Text('متابعة التوقف والانتظار')),
                 if (_showWaiting)
                   RideWaitingPanel(
                       rideId: rideId,

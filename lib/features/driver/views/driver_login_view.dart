@@ -142,7 +142,7 @@ class _DriverLoginViewState extends State<DriverLoginView> {
               const SizedBox(height: 4),
               Text(
                 otp
-                    ? 'أدخل رمز التحقق المرسل إلى هاتفك.'
+                    ? 'أدخل رمز التحقق المرسل إليك.'
                     : 'سجّل دخولك، وابدأ رحلتك القادمة.',
                 style: Theme.of(context).textTheme.bodySmall,
               ),

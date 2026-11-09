@@ -6,14 +6,11 @@ class AppBrandIcon extends StatelessWidget {
   final double size;
 
   @override
-  Widget build(BuildContext context) => ClipRRect(
-        borderRadius: BorderRadius.circular(size * .27),
-        child: Image.asset(
-          'assets/images/branding/yemen_drive_logo.png',
-          width: size,
-          height: size,
-          fit: BoxFit.cover,
-          semanticLabel: 'يمن درايف الكابتن',
-        ),
+  Widget build(BuildContext context) => Image.asset(
+        'assets/images/branding/brand_logo.webp',
+        width: size,
+        height: size,
+        fit: BoxFit.contain,
+        semanticLabel: 'يمن درايف الكابتن',
       );
 }

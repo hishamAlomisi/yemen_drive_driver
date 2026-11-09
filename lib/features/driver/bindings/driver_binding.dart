@@ -10,14 +10,7 @@ import '../repositories/driver_repository.dart';
 class DriverBinding extends Bindings {
   @override
   void dependencies() {
-    final provider = DriverProvider(Get.find<ApiClient>());
-    Get.lazyPut<DriverRepository>(() => ApiDriverRepository(provider));
-    Get.lazyPut<DriverLoginController>(
-      () => DriverLoginController(
-        Get.find<DriverRepository>(),
-        Get.find<AuthSessionService>(),
-      ),
-    );
+    _bindRepository();
     Get.lazyPut<DriverController>(
       () => DriverController(
         Get.find<DriverRepository>(),
@@ -25,4 +18,22 @@ class DriverBinding extends Bindings {
       ),
     );
   }
+}
+
+class DriverLoginBinding extends Bindings {
+  @override
+  void dependencies() {
+    _bindRepository();
+    Get.lazyPut<DriverLoginController>(
+      () => DriverLoginController(
+        Get.find<DriverRepository>(),
+        Get.find<AuthSessionService>(),
+      ),
+    );
+  }
+}
+
+void _bindRepository() {
+  final provider = DriverProvider(Get.find<ApiClient>());
+  Get.lazyPut<DriverRepository>(() => ApiDriverRepository(provider));
 }

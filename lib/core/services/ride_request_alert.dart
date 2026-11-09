@@ -1,5 +1,7 @@
 import 'dart:convert';
 
+import 'package:flutter/painting.dart';
+
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
@@ -78,7 +80,12 @@ Future<void> _show(
                 priority: Priority.high,
                 playSound: true,
                 enableVibration: true,
-                icon: 'ic_stat_yemendrive')),
+                icon: 'ic_stat_yemendrive',
+                color: Color(0xFF174C43),
+                largeIcon:
+                    DrawableResourceAndroidBitmap('ic_brand_notification'),
+              ),
+            ),
         payload: jsonEncode(payload));
     await storage.write(key: key, value: seen.join(','));
   } on Object {

@@ -205,6 +205,12 @@ void main() {
 
   Future<void> preview(WidgetTester tester, String name) async {
     if (const bool.fromEnvironment('UPDATE_PREVIEWS')) {
+      await tester.runAsync(() async {
+        for (final element in find.byType(Image).evaluate()) {
+          await precacheImage((element.widget as Image).image, element);
+        }
+      });
+      await tester.pump();
       await expectLater(
         find.byKey(const ValueKey('preview')),
         matchesGoldenFile('../docs/previews/$name.png'),
@@ -269,7 +275,9 @@ void main() {
     await mount(tester, card, width: 320, scale: 1.4);
     expect(find.text('تأكيد الوصول'), findsOneWidget);
     expect(find.text('إلغاء الرحلة'), findsOneWidget);
-    final arrivalCard = Scaffold(body: SingleChildScrollView(child: DriverRideCard(ride: {
+    final arrivalCard = Scaffold(
+        body: SingleChildScrollView(
+            child: DriverRideCard(ride: {
       ...sampleRide,
       'driverId': 42,
       'status': 9,

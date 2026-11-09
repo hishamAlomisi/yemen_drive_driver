@@ -4,9 +4,10 @@ import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 import '../../core/network/api_client.dart';
 import '../../core/network/api_models.dart';
+import '../../core/realtime/realtime_state_binding.dart';
 import '../models/ride_waiting_snapshot.dart';
 
-/// Server-approved waiting. Local time only animates the server's last snapshot.
+/// Driver-controlled waiting. Local time animates the server's last snapshot.
 class RideWaitingPanel extends StatefulWidget {
   const RideWaitingPanel({
     required this.rideId,
@@ -26,10 +27,11 @@ class _RideWaitingPanelState extends State<RideWaitingPanel>
     with WidgetsBindingObserver {
   Map<String, Object?>? _data;
   Timer? _timer;
+  RealtimeStateBinding? _stateBinding;
   final _elapsed = Stopwatch();
   bool _loading = false;
   bool _busy = false;
-  bool _confirming = false;
+  bool _paused = false;
   String? _error;
   String? _requestKey;
   int _ticks = 0;
@@ -40,11 +42,19 @@ class _RideWaitingPanelState extends State<RideWaitingPanel>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _stateBinding = RealtimeStateBinding(
+        owner: this,
+        resources: const {'ride'},
+        accepts: (change) =>
+            change.resource == 'ride' && change.resourceId == widget.rideId,
+        refresh: () => _refresh(requireSuccess: true));
     unawaited(_refresh());
     _timer = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (!mounted) return;
-      if (++_ticks % 5 == 0) unawaited(_refresh());
-      if (_data != null) setState(() {});
+      if (!mounted || _paused || !TickerMode.valuesOf(context).enabled) return;
+      if (++_ticks % 5 == 0 && _stateBinding?.synchronized != true) {
+        unawaited(_refresh());
+      }
+      if (_session['isOpen'] == true) setState(() {});
     });
   }
 
@@ -65,10 +75,14 @@ class _RideWaitingPanelState extends State<RideWaitingPanel>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) unawaited(_refresh());
+    _paused = state != AppLifecycleState.resumed;
+    if (!_paused) unawaited(_refresh());
   }
 
   Map<String, Object?> get _session => _map(_data?['session']);
+  bool get _stale =>
+      _error != null ||
+      (_elapsed.elapsed.inSeconds >= 15 && _stateBinding?.synchronized != true);
   static Map<String, Object?> _map(Object? raw) =>
       raw is Map ? Map<String, Object?>.from(raw) : {};
   static double _number(Object? raw) => RideWaitingSnapshot.number(raw);
@@ -79,8 +93,12 @@ class _RideWaitingPanelState extends State<RideWaitingPanel>
       operation: operation,
       data: {
         'rideId': widget.rideId,
-        if (operation != 'get') 'sessionId': _session['id'],
-        if (operation == 'add') 'requestKey': _requestKey,
+        if (operation != 'get' && operation != 'start')
+          'sessionId': _session['id'],
+        if (operation == 'start' || operation == 'request_resume')
+          'requestKey': _requestKey,
+        if (operation == 'accept_resume' || operation == 'reject_resume')
+          'resumeRequestKey': RideWaitingSnapshot(_data!).resumeRequestKey,
       },
     );
     if (result is ApiFailure) {
@@ -94,7 +112,7 @@ class _RideWaitingPanelState extends State<RideWaitingPanel>
   void _apply(Map<String, Object?> value) {
     final oldSessionId = _session['id'];
     final old =
-        '${_session['id']}-${_session['isOpen']}-${_session['startedAtUtc']}-${_data?['settledWaitingFee']}';
+        '${_session['id']}-${_session['isOpen']}-${_session['startedAtUtc']}-${_data?['settledWaitingFee']}-${_session['resumeRequest']}';
     setState(() {
       _data = value;
       _error = null;
@@ -103,78 +121,55 @@ class _RideWaitingPanelState extends State<RideWaitingPanel>
         ..start();
     });
     final next =
-        '${_session['id']}-${_session['isOpen']}-${_session['startedAtUtc']}-${_data?['settledWaitingFee']}';
+        '${_session['id']}-${_session['isOpen']}-${_session['startedAtUtc']}-${_data?['settledWaitingFee']}-${_session['resumeRequest']}';
     if (_session['id'] != oldSessionId) _requestKey = null;
     if (old != next) widget.onChanged?.call();
   }
 
-  Future<void> _refresh() async {
-    if (_loading || _busy) return;
+  Future<void> _refresh({bool requireSuccess = false}) async {
+    if (_loading || _busy) {
+      if (requireSuccess) throw StateError('Waiting refresh is in progress');
+      return;
+    }
     _loading = true;
     final revision = _revision;
     final refreshId = ++_refreshId;
+    final epoch = _stateBinding?.epoch;
     try {
       final value = await _call('get');
+      if (epoch != null) _stateBinding?.verify(epoch);
       if (mounted && revision == _revision) _apply(value);
-    } catch (_) {
-      if (mounted && revision == _revision) {
+    } catch (error) {
+      if (mounted &&
+          revision == _revision &&
+          error is! StateSnapshotSuperseded) {
         setState(() => _error = 'تعذرت مزامنة الانتظار. أعد المحاولة.');
       }
+      if (requireSuccess) rethrow;
     } finally {
       if (refreshId == _refreshId) _loading = false;
     }
   }
 
-  String _policyText() =>
-      'المهلة المجانية لكل توقف: ${_data?['waitingFreeMinutes'] ?? 0} دقيقة.\n'
-      'بعدها ${_data?['waitingPricePerMinute'] ?? 0} ر.ي للدقيقة، باحتساب الثواني.\n'
-      'سقف الانتظار لجميع توقفات الرحلة: ${_data?['waitingMaxFee'] ?? 0} ر.ي.\n'
-      'يبدأ الوقت عند موافقة الطرف الآخر. ينتهي باستئناف السائق، أو الحركة المؤكدة، أو بلوغ السقف. ويتوقف إذا انقطع تحديث موقع السائق لدقيقتين.';
-
   Future<void> _action(String operation) async {
-    if (_busy || _confirming) return;
-    final rideId = widget.rideId;
-    final sessionId = _session['id'];
-    if (operation == 'add' || operation == 'accept') {
-      setState(() => _confirming = true);
-      final accepted = await showDialog<bool>(
-        context: context,
-        builder: (context) => AlertDialog(
-          title: Text(
-            operation == 'add' ? 'توقف بطلب الراكب' : 'الموافقة على الانتظار',
-          ),
-          content: SingleChildScrollView(child: Text(_policyText())),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context, false),
-              child: const Text('رجوع'),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.pop(context, true),
-              child: Text(
-                operation == 'add' ? 'إرسال الطلب' : 'أوافق على بدء الانتظار',
-              ),
-            ),
-          ],
-        ),
-      );
-      if (!mounted) return;
-      setState(() => _confirming = false);
-      if (accepted != true || rideId != widget.rideId) return;
-      if (sessionId != _session['id'] ||
-          _data?[operation == 'add' ? 'canRequest' : 'canDecide'] != true ||
-          _error != null ||
-          _elapsed.elapsed.inSeconds >= 15) {
-        unawaited(_refresh());
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('تغيرت حالة الانتظار. راجع الحالة المحدثة.'),
-          ),
-        );
-        return;
-      }
+    if (_busy || _data == null) return;
+    final snapshot = RideWaitingSnapshot(_data!);
+    final allowed = switch (operation) {
+      'start' => widget.isDriver && snapshot.canStart && !snapshot.isOpen,
+      'resume' => widget.isDriver && snapshot.canResume && snapshot.isActive,
+      'accept_resume' || 'reject_resume' => widget.isDriver &&
+          snapshot.canDecideResume &&
+          snapshot.resumeRequestPending,
+      'request_resume' =>
+        !widget.isDriver && snapshot.canRequestResume && snapshot.isActive,
+      _ => false,
+    };
+    if (!allowed) return;
+    if (operation != 'resume' && _stale) {
+      unawaited(_refresh());
+      return;
     }
-    if (operation == 'add') {
+    if (operation == 'start' || operation == 'request_resume') {
       final random = math.Random.secure();
       final hex = List.generate(
         16,
@@ -189,7 +184,9 @@ class _RideWaitingPanelState extends State<RideWaitingPanel>
       final data = await _call(operation);
       if (!mounted || revision != _revision) return;
       _apply(data);
-      if (operation == 'add') _requestKey = null;
+      if (operation == 'start' || operation == 'request_resume') {
+        _requestKey = null;
+      }
     } catch (error) {
       if (mounted && revision == _revision) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -221,18 +218,15 @@ class _RideWaitingPanelState extends State<RideWaitingPanel>
     final session = _session;
     final open = snapshot.isOpen;
     final active = snapshot.isActive;
-    if (!open &&
-        _data?['canRequest'] != true &&
-        _number(_data?['waitingFee']) == 0) {
+    if (!open && !snapshot.canStart && _number(_data?['waitingFee']) == 0) {
       return const SizedBox.shrink();
     }
     final seconds = snapshot.elapsedSeconds(_elapsed.elapsed);
     final freeSeconds = (_number(session['freeMinutes']) * 60).toInt();
     final waitingFee = snapshot.waitingFee(_elapsed.elapsed);
     final total = snapshot.totalAmount(_elapsed.elapsed);
-    final pending = open && !active;
-    final stale = _error != null || _elapsed.elapsed.inSeconds >= 15;
-    final busy = _busy || _confirming;
+    final stale = _stale;
+    final busy = _busy;
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(12),
@@ -241,11 +235,7 @@ class _RideWaitingPanelState extends State<RideWaitingPanel>
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             Text(
-              active
-                  ? 'انتظار بطلب الراكب'
-                  : pending
-                      ? 'طلب انتظار بانتظار الموافقة'
-                      : 'الانتظار أثناء الرحلة',
+              active ? 'الرحلة متوقفة' : 'التوقف والانتظار أثناء الرحلة',
               style: Theme.of(context).textTheme.titleSmall,
             ),
             if (active) ...[
@@ -260,12 +250,13 @@ class _RideWaitingPanelState extends State<RideWaitingPanel>
                     : 'بدأ احتساب رسوم الانتظار',
               ),
             ],
-            if (pending)
-              Text(
-                _data?['requestedByMe'] == true
-                    ? 'أُرسل الطلب. لا يبدأ الوقت قبل موافقة الطرف الآخر.'
-                    : 'راجع الشروط أدناه قبل الموافقة.',
-              ),
+            Text(
+              'المهلة المجانية: ${_data?['waitingFreeMinutes'] ?? 0} دقيقة لكل توقف · ${_data?['waitingPricePerMinute'] ?? 0} ر.ي للدقيقة · سقف الرحلة ${_data?['waitingMaxFee'] ?? 0} ر.ي',
+            ),
+            if (snapshot.resumeRequestPending)
+              Text(widget.isDriver
+                  ? 'طلب الراكب استئناف الرحلة. يمكنك قبول طلبه أو استئناف الرحلة مباشرةً.'
+                  : 'أُرسل طلب الاستئناف إلى السائق. يستمر الانتظار حتى الاستئناف.'),
             Text(
               'أجرة الرحلة ${_number(_data?['baseFare']).toStringAsFixed(0)} + الخدمة ${_number(_data?['serviceFee']).toStringAsFixed(0)} + الانتظار ${waitingFee.toStringAsFixed(0)} ر.ي',
             ),
@@ -276,8 +267,6 @@ class _RideWaitingPanelState extends State<RideWaitingPanel>
                   'connection_lost' => 'أُوقف الانتظار لانقطاع تحديث الموقع.',
                   'vehicle_moving' => 'أُوقف الانتظار بعد تأكد حركة السيارة.',
                   'fee_cap' => 'وصل الانتظار إلى سقف الرسوم.',
-                  'rejected' => 'رُفض طلب الانتظار دون رسوم.',
-                  'request_expired' => 'انتهت مهلة الموافقة على الانتظار.',
                   _ => 'انتهى التوقف.'
                 },
               ),
@@ -287,35 +276,40 @@ class _RideWaitingPanelState extends State<RideWaitingPanel>
                 child: const Text('بانتظار المزامنة — تحديث الحالة'),
               ),
             if (_busy) const LinearProgressIndicator(),
-            if (_data?['canRequest'] == true)
+            if (widget.isDriver && snapshot.canStart && !open)
               OutlinedButton.icon(
-                onPressed: busy || stale ? null : () => _action('add'),
+                onPressed: busy || stale ? null : () => _action('start'),
                 icon: const Icon(Icons.timer_outlined),
-                label: const Text('توقف بطلب الراكب'),
+                label: const Text('بدء التوقف'),
               ),
-            if (_data?['canDecide'] == true)
+            if (widget.isDriver &&
+                snapshot.canDecideResume &&
+                snapshot.resumeRequestPending)
               Wrap(
                 spacing: 8,
                 children: [
                   FilledButton(
-                    onPressed: busy || stale ? null : () => _action('accept'),
-                    child: const Text('مراجعة وموافقة'),
+                    onPressed:
+                        busy || stale ? null : () => _action('accept_resume'),
+                    child: const Text('قبول طلب الاستئناف'),
                   ),
                   TextButton(
-                    onPressed: busy ? null : () => _action('reject'),
-                    child: const Text('رفض'),
+                    onPressed:
+                        busy || stale ? null : () => _action('reject_resume'),
+                    child: const Text('رفض طلب الاستئناف'),
                   ),
                 ],
               ),
-            if (pending && _data?['requestedByMe'] == true)
-              TextButton(
-                onPressed: busy ? null : () => _action('cancel'),
-                child: const Text('سحب طلب الانتظار'),
-              ),
-            if (active && widget.isDriver)
+            if (active && widget.isDriver && snapshot.canResume)
               FilledButton(
-                onPressed: busy ? null : () => _action('update'),
+                onPressed: busy ? null : () => _action('resume'),
                 child: const Text('استئناف الرحلة وإيقاف الانتظار'),
+              ),
+            if (active && !widget.isDriver && snapshot.canRequestResume)
+              OutlinedButton(
+                onPressed:
+                    busy || stale ? null : () => _action('request_resume'),
+                child: const Text('طلب استئناف الرحلة'),
               ),
           ],
         ),
@@ -325,6 +319,7 @@ class _RideWaitingPanelState extends State<RideWaitingPanel>
 
   @override
   void dispose() {
+    _stateBinding?.dispose();
     WidgetsBinding.instance.removeObserver(this);
     _timer?.cancel();
     _elapsed.stop();

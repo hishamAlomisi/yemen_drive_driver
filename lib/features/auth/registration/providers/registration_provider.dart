@@ -2,18 +2,32 @@ import 'package:dio/dio.dart';
 
 import '../../../../core/network/api_client.dart';
 import '../../../../core/network/api_endpoints.dart';
+import '../../../../core/services/otp_push_request_fields.dart';
+import '../../../../core/services/otp_sms_service.dart';
 import '../models/registration_models.dart';
 
 class RegistrationProvider {
-  const RegistrationProvider(this._client);
+  const RegistrationProvider(this._client,
+      {OtpPushFieldsSupplier? otpPushFields,})
+      : _otpPushFields = otpPushFields;
 
   final ApiClient _client;
+  final OtpPushFieldsSupplier? _otpPushFields;
 
-  Future<Response<Object?>> requestOtp(SignUpDraft draft) =>
-      _client.dio.post<Object?>(
-        '${ApiEndpoints.signUp}/request-otp',
-        data: draft.toJson(),
-      );
+  Future<Response<Object?>> requestOtp(SignUpDraft draft) async {
+    final otpFields = await OtpSmsService.prepareRequest(
+      pushFields: () =>
+          _otpPushFields?.call(null) ?? requestOtpPushFields(_client),
+    );
+    return _client.dio.post<Object?>(
+      '${ApiEndpoints.signUp}/request-otp',
+      data: {
+        ...draft.toJson(),
+        'clientType': 'driver',
+        ...otpFields,
+      },
+    );
+  }
 
   Future<Response<Object?>> verifyOtp({
     required String phone,

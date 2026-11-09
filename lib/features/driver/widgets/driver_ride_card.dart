@@ -7,8 +7,10 @@ import '../views/driver_chat_view.dart';
 import 'driver_design.dart';
 import 'driver_arrival_panel.dart';
 import 'driver_ride_actions.dart';
+import 'driver_request_distances.dart';
 import '../../../shared/widgets/ride_waiting_panel.dart';
 import '../../../shared/widgets/ride_route_change_panel.dart';
+import '../../../shared/widgets/ride_chat_badge.dart';
 
 class DriverRideCard extends GetView<DriverController> {
   const DriverRideCard({required this.ride, super.key});
@@ -27,7 +29,7 @@ class DriverRideCard extends GetView<DriverController> {
           iconSize: 18,
           onPressed: () =>
               Get.to<void>(() => DriverChatView(rideId: '${ride['id']}')),
-          icon: const Icon(Icons.chat_bubble_outline),
+          icon: RideChatBadge(rideId: int.tryParse('${ride['id']}') ?? 0),
         ),
         const SizedBox(width: 6),
         IconButton.outlined(
@@ -58,6 +60,13 @@ class DriverRideCard extends GetView<DriverController> {
       9: 'وصل السائق إلى نقطة الانطلاق',
     };
     final actions = <Widget>[
+      if (!assigned && ride['driverId'] == null && (state == 1 || state == 2))
+        DriverRideAction(
+          outlined: true,
+          onPressed: () => controller.openRequestRoutePreview(ride),
+          icon: const Icon(Icons.route_outlined),
+          label: const Text('عرض مسار الرحلة'),
+        ),
       if (canSendOrEditOffer)
         DriverRideAction(
           onPressed: () => controller.sendOffer(ride),
@@ -70,12 +79,13 @@ class DriverRideCard extends GetView<DriverController> {
                     : 'إرسال عرض',
           ),
         ),
-      if (!assigned && ride['pickupLatitude'] != null)
+      if (ride['pickupLatitude'] != null &&
+          (!assigned || {3, 4, 9}.contains(state)))
         DriverRideAction(
           outlined: true,
           onPressed: () => controller.openPickupNavigation(ride),
           icon: const Icon(Icons.navigation_outlined),
-          label: const Text('مسار الانطلاق'),
+          label: Text(assigned ? 'تتبع الطريق إلى الراكب' : 'مسار الانطلاق'),
         ),
       if (assigned && state == 3)
         DriverRideAction(
@@ -173,7 +183,11 @@ class DriverRideCard extends GetView<DriverController> {
                     borderRadius: BorderRadius.circular(13),
                   ),
                   child: Icon(
-                    Icons.local_taxi_outlined,
+                    state == 5
+                        ? Icons.navigation_rounded
+                        : state == 4
+                            ? Icons.directions_car_filled_rounded
+                            : Icons.local_taxi_outlined,
                     color: Theme.of(context).colorScheme.primary,
                     size: 22,
                   ),
@@ -198,7 +212,14 @@ class DriverRideCard extends GetView<DriverController> {
             ),
             const SizedBox(height: 12),
             RideRoute(ride: ride),
-            if (ride['pickupDistanceMeters'] != null) ...[
+            if (!assigned &&
+                ride['driverId'] == null &&
+                (state == 1 || state == 2))
+              DriverRequestDistances(
+                key: ValueKey('request-distance-${ride['id']}'),
+                ride: ride,
+              )
+            else if (ride['pickupDistanceMeters'] != null) ...[
               const SizedBox(height: 4),
               Text(
                 'يبعد عنك ${_distanceText(ride['pickupDistanceMeters'])}',

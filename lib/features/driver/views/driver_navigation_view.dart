@@ -6,10 +6,16 @@ import 'package:get/get.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 import '../../../shared/widgets/app_google_map.dart';
+import '../../../shared/widgets/live_tracking_marker_icons.dart';
+import '../../../shared/widgets/live_route_polyline.dart';
 import '../../../shared/widgets/ride_waiting_panel.dart';
 import '../../../shared/widgets/ride_financial_follow_up.dart';
 import '../../../shared/widgets/ride_route_change_panel.dart';
+import '../../../shared/widgets/ride_chat_badge.dart';
+import 'driver_chat_view.dart';
 import '../controllers/driver_controller.dart';
+import '../models/driving_route_progress.dart';
+import '../models/driver_map_motion.dart';
 import '../repositories/route_repository.dart';
 
 /// In-app navigation preview for the assigned driver's pickup or destination.
@@ -22,11 +28,12 @@ class DriverNavigationView extends StatefulWidget {
   State<DriverNavigationView> createState() => _DriverNavigationViewState();
 }
 
-class _DriverNavigationViewState extends State<DriverNavigationView> {
-  late final LatLng _origin;
+class _DriverNavigationViewState extends State<DriverNavigationView>
+    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
+  LatLng? _origin;
   late LatLng _destination;
-  late final String _title;
-  late final bool _followsDestination;
+  late String _title;
+  late bool _followsDestination;
   late final int? _rideId;
   late final DriverController _driverController;
   late final Worker _positionWorker;
@@ -39,11 +46,28 @@ class _DriverNavigationViewState extends State<DriverNavigationView> {
   LatLng? _cameraFollowTarget;
   LatLng? _lastRouteOrigin;
   DateTime? _lastRouteRequestedAt;
-  DateTime? _animationStartedAt;
+  DateTime? _lastRouteAttemptedAt;
+  DateTime? _lastObservedAt;
+  Position? _lastGpsPosition;
   LatLng? _animationFrom;
   LatLng? _animationTarget;
-  Timer? _markerAnimationTimer;
+  double _animationFromBearing = 0;
+  double _animationTargetBearing = 0;
+  late final AnimationController _markerAnimation;
+  final _markerFrameRevision = ValueNotifier<int>(0);
+  Duration? _lastMarkerFrameElapsed;
+  int _followRequestId = 0;
+  bool _followingDriver = true;
+  bool _foreground = true;
+  bool _tickerEnabled = true;
+  bool get _mapWorkEnabled => _foreground && _tickerEnabled;
   List<LatLng> _routePoints = const <LatLng>[];
+  List<LatLng> _remainingRoutePoints = const <LatLng>[];
+  DrivingRouteProgress? _routeProgress;
+  int _remainingDistanceMeters = 0;
+  List<LatLng>? _polylinePoints;
+  Color? _polylineColor;
+  Set<Polyline> _routePolylines = const <Polyline>{};
   bool _loading = true;
   bool _routeRequestInFlight = false;
   bool _routeReloadRequested = false;
@@ -54,23 +78,31 @@ class _DriverNavigationViewState extends State<DriverNavigationView> {
   String _nextInstruction = '';
   String _nextManeuver = '';
   double _bearing = 0;
-  double? _passengerBearing;
   DateTime? _passengerObservedAt;
   Timer? _locationAgeTimer;
   int _distanceMeters = 0;
   int _durationSeconds = 0;
   int _nextStepDistanceMeters = 0;
+  BitmapDescriptor? _approachIcon;
+  BitmapDescriptor? _tripIcon;
+  BitmapDescriptor? _pickupIcon;
+  BitmapDescriptor? _destinationIcon;
+  bool get _tripStarted =>
+      '${_ride?['status']}' == '5' ||
+      ('${_ride?['status']}' == '8' && _ride?['startedAtUtc'] != null);
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    final lifecycle = WidgetsBinding.instance.lifecycleState;
+    _foreground = lifecycle == null || lifecycle == AppLifecycleState.resumed;
+    _markerAnimation = AnimationController(vsync: this)
+      ..addListener(_updateAnimatedMarker);
     final data = Map<Object?, Object?>.from(
       (Get.arguments as Map?) ?? const <Object?, Object?>{},
     );
-    _origin = LatLng(
-      _number(data['originLatitude']),
-      _number(data['originLongitude']),
-    );
+    _origin = _coordinates(data['originLatitude'], data['originLongitude']);
     _destination = LatLng(
       _number(data['destinationLatitude']),
       _number(data['destinationLongitude']),
@@ -79,7 +111,13 @@ class _DriverNavigationViewState extends State<DriverNavigationView> {
     _followsDestination = data['followsDestination'] == true;
     _rideId = int.tryParse('${data['rideId'] ?? ''}');
     _driverController = Get.find<DriverController>();
+    unawaited(_loadMarkerIcons());
     final initialPosition = _driverController.currentPosition.value;
+    _lastGpsPosition = initialPosition;
+    _lastObservedAt = initialPosition?.timestamp;
+    if (initialPosition != null && _hasReliableHeading(initialPosition)) {
+      _bearing = initialPosition.heading % 360;
+    }
     _driverPosition = initialPosition == null
         ? _origin
         : LatLng(initialPosition.latitude, initialPosition.longitude);
@@ -105,9 +143,65 @@ class _DriverNavigationViewState extends State<DriverNavigationView> {
           _driverController.refreshRide(rideId).catchError((Object _) {}));
     }
     _locationAgeTimer = Timer.periodic(const Duration(seconds: 15), (_) {
-      if (mounted) setState(() {});
+      if (mounted && _mapWorkEnabled) setState(() {});
     });
-    unawaited(_loadRoute(_driverPosition!, force: true));
+    if (_driverPosition != null) {
+      unawaited(_loadRoute(_driverPosition!, force: true));
+    } else {
+      _loading = false;
+    }
+    unawaited(_driverController.updateLocation());
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final wasEnabled = _mapWorkEnabled;
+    _tickerEnabled = TickerMode.valuesOf(context).enabled;
+    _syncMapWork(wasEnabled);
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    final wasEnabled = _mapWorkEnabled;
+    _foreground = state == AppLifecycleState.resumed;
+    _syncMapWork(wasEnabled);
+    if (mounted && _mapWorkEnabled) setState(() {});
+  }
+
+  void _syncMapWork(bool wasEnabled) {
+    if (!_mapWorkEnabled) {
+      _markerAnimation.stop();
+    } else if (!wasEnabled) {
+      final position = _lastGpsPosition;
+      if (position == null) return;
+      _driverPosition = LatLng(position.latitude, position.longitude);
+      _cameraFollowTarget = _driverPosition;
+      _bearing = DriverMapMotion.heading(null, position, _bearing);
+      _refreshRouteProgress();
+      unawaited(_loadRoute(_driverPosition!));
+    }
+  }
+
+  Future<void> _loadMarkerIcons() async {
+    try {
+      final icons = await Future.wait([
+        LiveTrackingMarkerIcons.build(inProgress: false),
+        LiveTrackingMarkerIcons.build(inProgress: true),
+        LiveTrackingMarkerIcons.buildStop(
+            destination: false, label: 'نقطة الانطلاق'),
+        LiveTrackingMarkerIcons.buildStop(destination: true, label: 'الوجهة'),
+      ]);
+      if (!mounted) return;
+      setState(() {
+        _approachIcon = icons[0];
+        _tripIcon = icons[1];
+        _pickupIcon = icons[2];
+        _destinationIcon = icons[3];
+      });
+    } on Object {
+      // A failed bitmap render keeps the location marker visible.
+    }
   }
 
   void _syncRide() {
@@ -116,6 +210,14 @@ class _DriverNavigationViewState extends State<DriverNavigationView> {
         .where((item) => '${item['id']}' == '$_rideId')
         .firstOrNull;
     if (ride == null) return;
+    final status = int.tryParse('${ride['status']}');
+    final started =
+        status == 5 || (status == 8 && ride['startedAtUtc'] != null);
+    final phaseChanged = started && !_followsDestination;
+    if (started) {
+      _followsDestination = true;
+      _title = 'تتبع الرحلة إلى الوجهة';
+    }
     final latitude = double.tryParse('${ride['destinationLatitude']}');
     final longitude = double.tryParse('${ride['destinationLongitude']}');
     final version = int.tryParse('${ride['routeVersion']}') ?? 0;
@@ -127,8 +229,10 @@ class _DriverNavigationViewState extends State<DriverNavigationView> {
         latitude.abs() <= 90 &&
         longitude.abs() <= 180;
     final destination = canFollow ? LatLng(latitude, longitude) : _destination;
-    final routeChanged =
-        canFollow && (destination != _destination || version != _routeVersion);
+    final routeChanged = canFollow &&
+        (phaseChanged ||
+            destination != _destination ||
+            version != _routeVersion);
     setState(() {
       _ride = ride;
       _routeVersion = version;
@@ -142,10 +246,12 @@ class _DriverNavigationViewState extends State<DriverNavigationView> {
         _nextManeuver = '';
         _error = null;
         _loading = true;
+        _refreshRouteProgress();
       }
     });
-    if (routeChanged) {
-      unawaited(_loadRoute(_driverPosition ?? _origin, force: true));
+    final origin = _driverPosition ?? _origin;
+    if (routeChanged && origin != null) {
+      unawaited(_loadRoute(origin, force: true));
     }
   }
 
@@ -164,71 +270,104 @@ class _DriverNavigationViewState extends State<DriverNavigationView> {
   void _setPassengerPosition(PassengerLocationUpdate? location) {
     _passengerPosition =
         location == null ? null : LatLng(location.latitude, location.longitude);
-    _passengerBearing = location?.bearing;
     _passengerObservedAt = location?.observedAtUtc;
   }
 
   void _handlePosition(Position? position) {
     if (position == null ||
+        !position.latitude.isFinite ||
+        !position.longitude.isFinite ||
+        position.latitude.abs() > 90 ||
+        position.longitude.abs() > 180 ||
         !position.accuracy.isFinite ||
-        position.accuracy <= 0 ||
-        position.accuracy > 75) {
+        position.accuracy <= 0) {
       return;
     }
+    final previousTime = _lastObservedAt;
+    if (previousTime != null && !position.timestamp.isAfter(previousTime))
+      return;
+    final age = DateTime.now().toUtc().difference(position.timestamp.toUtc());
+    if (age > const Duration(seconds: 30) || age < const Duration(seconds: -5))
+      return;
+    final sampleGap = previousTime == null
+        ? null
+        : position.timestamp.difference(previousTime);
+    _lastObservedAt = position.timestamp;
 
     final target = LatLng(position.latitude, position.longitude);
-    final headingIsReliable = position.heading.isFinite &&
-        position.heading >= 0 &&
-        (position.speed.isFinite ? position.speed : 0) > 0.7;
+    final bearing =
+        DriverMapMotion.heading(_lastGpsPosition, position, _bearing);
+    _lastGpsPosition = position;
+    if (!_mapWorkEnabled) {
+      _markerAnimation.stop();
+      _driverPosition = target;
+      _cameraFollowTarget = target;
+      _bearing = bearing;
+      return;
+    }
     setState(() {
-      if (headingIsReliable) _bearing = position.heading % 360;
-      _animateMarkerTo(target);
-      final previousCameraTarget = _cameraFollowTarget ?? _origin;
-      if (Geolocator.distanceBetween(
-            previousCameraTarget.latitude,
-            previousCameraTarget.longitude,
-            target.latitude,
-            target.longitude,
-          ) >=
-          150) {
-        _cameraFollowTarget = target;
-      }
+      _refreshRouteProgress();
+      _animateMarkerTo(target, bearing, sampleGap);
     });
-    unawaited(_loadRoute(target));
+    if (position.accuracy <= 75) unawaited(_loadRoute(target));
   }
 
-  void _animateMarkerTo(LatLng target) {
-    _markerAnimationTimer?.cancel();
-    final start = _driverPosition ?? target;
+  bool _hasReliableHeading(Position position) =>
+      position.heading.isFinite &&
+      position.heading >= 0 &&
+      position.speed.isFinite &&
+      position.speed > 0.7;
+
+  void _animateMarkerTo(LatLng target, double bearing, Duration? sampleGap) {
+    _markerAnimation.stop();
+    _lastMarkerFrameElapsed = null;
+    final start = _driverPosition;
+    if (start == null ||
+        sampleGap == null ||
+        sampleGap > const Duration(seconds: 10) ||
+        Geolocator.distanceBetween(start.latitude, start.longitude,
+                target.latitude, target.longitude) >
+            250) {
+      _driverPosition = target;
+      _cameraFollowTarget = target;
+      _bearing = bearing;
+      return;
+    }
     _animationFrom = start;
     _animationTarget = target;
-    _animationStartedAt = DateTime.now();
-    const duration = Duration(milliseconds: 1500);
-    _markerAnimationTimer = Timer.periodic(
-      const Duration(milliseconds: 40),
-      (timer) {
-        final from = _animationFrom;
-        final to = _animationTarget;
-        final startedAt = _animationStartedAt;
-        if (!mounted || from == null || to == null || startedAt == null) {
-          timer.cancel();
-          return;
-        }
-        final progress = (DateTime.now().difference(startedAt).inMilliseconds /
-                duration.inMilliseconds)
-            .clamp(0.0, 1.0);
-        setState(() {
-          _driverPosition = LatLng(
+    _animationFromBearing = _bearing;
+    _animationTargetBearing = bearing;
+    // Animate only between received fixes; stop exactly at the latest GPS.
+    _markerAnimation.duration = DriverMapMotion.duration(sampleGap);
+    _markerAnimation.forward(from: 0);
+  }
+
+  void _updateAnimatedMarker() {
+    final from = _animationFrom;
+    final to = _animationTarget;
+    if (!mounted || !_mapWorkEnabled || from == null || to == null) return;
+    final progress = _markerAnimation.value;
+    final elapsed = _markerAnimation.lastElapsedDuration ?? Duration.zero;
+    if (progress < 1 &&
+        _lastMarkerFrameElapsed != null &&
+        elapsed - _lastMarkerFrameElapsed! < const Duration(milliseconds: 33)) {
+      return;
+    }
+    _lastMarkerFrameElapsed = elapsed;
+    final headingDelta =
+        (_animationTargetBearing - _animationFromBearing + 540) % 360 - 180;
+    final longitudeDelta = (to.longitude - from.longitude + 540) % 360 - 180;
+    _driverPosition = progress >= 1
+        ? to
+        : LatLng(
             from.latitude + (to.latitude - from.latitude) * progress,
-            from.longitude + (to.longitude - from.longitude) * progress,
+            (from.longitude + longitudeDelta * progress + 540) % 360 - 180,
           );
-        });
-        if (progress >= 1) {
-          timer.cancel();
-          _markerAnimationTimer = null;
-        }
-      },
-    );
+    _bearing = (_animationFromBearing + headingDelta * progress + 360) % 360;
+    _cameraFollowTarget = _driverPosition;
+    // Marker updates are paced to roughly 30/second. Panels, route scans,
+    // and distance calculations only update for real fixes or business events.
+    _markerFrameRevision.value++;
   }
 
   Future<void> _loadRoute(LatLng origin, {bool force = false}) async {
@@ -248,9 +387,18 @@ class _DriverNavigationViewState extends State<DriverNavigationView> {
     final requestedRecently = _lastRouteRequestedAt != null &&
         DateTime.now().difference(_lastRouteRequestedAt!) <
             const Duration(seconds: 45);
-    if (!force && (!movedEnough || requestedRecently)) return;
+    final offRoute = (_routeProgress?.offRouteMeters ?? 0) > 75;
+    final attemptedRecently = _lastRouteAttemptedAt != null &&
+        DateTime.now().difference(_lastRouteAttemptedAt!) <
+            const Duration(seconds: 5);
+    if (!force &&
+        (attemptedRecently ||
+            (!offRoute && (!movedEnough || requestedRecently)))) {
+      return;
+    }
 
     _routeRequestInFlight = true;
+    _lastRouteAttemptedAt = DateTime.now();
     final generation = _routeGeneration;
     final destination = _destination;
     if (_routePoints.isEmpty && mounted) setState(() => _loading = true);
@@ -272,6 +420,7 @@ class _DriverNavigationViewState extends State<DriverNavigationView> {
         _nextInstruction = nextStep?.instruction ?? '';
         _nextManeuver = nextStep?.maneuver ?? '';
         _nextStepDistanceMeters = nextStep?.distanceMeters ?? 0;
+        _refreshRouteProgress();
       });
     } catch (_) {
       if (mounted && generation == _routeGeneration) {
@@ -282,7 +431,10 @@ class _DriverNavigationViewState extends State<DriverNavigationView> {
       if (mounted) {
         if (_routeReloadRequested || generation != _routeGeneration) {
           _routeReloadRequested = false;
-          unawaited(_loadRoute(_driverPosition ?? _origin, force: true));
+          final nextOrigin = _driverPosition ?? _origin;
+          if (nextOrigin != null) {
+            unawaited(_loadRoute(nextOrigin, force: true));
+          }
         } else {
           setState(() => _loading = false);
         }
@@ -290,31 +442,19 @@ class _DriverNavigationViewState extends State<DriverNavigationView> {
     }
   }
 
-  List<LatLng> get _remainingRoutePoints {
-    final current = _driverPosition;
-    if (current == null || _routePoints.length < 2) return _routePoints;
-    var nearestIndex = 0;
-    var nearestMeters = double.infinity;
-    for (var index = 0; index < _routePoints.length; index++) {
-      final point = _routePoints[index];
-      final meters = Geolocator.distanceBetween(
-        current.latitude,
-        current.longitude,
-        point.latitude,
-        point.longitude,
-      );
-      if (meters < nearestMeters) {
-        nearestMeters = meters;
-        nearestIndex = index;
-      }
+  void _refreshRouteProgress() {
+    final fix = _lastGpsPosition;
+    final current =
+        fix == null ? _driverPosition : LatLng(fix.latitude, fix.longitude);
+    _routeProgress = current == null || _routePoints.length < 2
+        ? null
+        : DrivingRouteProgress.from(_routePoints, current);
+    final points =
+        _remainingRoutePoints = _routeProgress?.points ?? _routePoints;
+    if (points.length < 2) {
+      _remainingDistanceMeters = _distanceMeters;
+      return;
     }
-    final nextIndex = (nearestIndex + 1).clamp(0, _routePoints.length - 1);
-    return <LatLng>[current, ..._routePoints.skip(nextIndex)];
-  }
-
-  int get _remainingDistanceMeters {
-    final points = _remainingRoutePoints;
-    if (points.length < 2) return _distanceMeters;
     var distance = 0.0;
     for (var index = 1; index < points.length; index++) {
       distance += Geolocator.distanceBetween(
@@ -324,7 +464,7 @@ class _DriverNavigationViewState extends State<DriverNavigationView> {
         points[index].longitude,
       );
     }
-    return distance.round();
+    _remainingDistanceMeters = distance.round();
   }
 
   int get _remainingDurationSeconds {
@@ -341,38 +481,57 @@ class _DriverNavigationViewState extends State<DriverNavigationView> {
             rotation: _bearing,
             flat: true,
             anchor: const Offset(0.5, 0.5),
-            icon: BitmapDescriptor.defaultMarkerWithHue(
-              BitmapDescriptor.hueAzure,
-            ),
-            infoWindow: const InfoWindow(title: 'موقعك'),
+            icon: (_tripStarted ? _tripIcon : _approachIcon) ??
+                BitmapDescriptor.defaultMarkerWithHue(
+                    BitmapDescriptor.hueAzure),
+            infoWindow: InfoWindow(
+                title: _tripStarted
+                    ? 'موقعك · الرحلة جارية'
+                    : 'موقعك · الطريق إلى الراكب'),
           ),
-        if (_passengerPosition != null)
+        if (!_tripStarted &&
+            _passengerPosition != null &&
+            (_followsDestination ||
+                Geolocator.distanceBetween(
+                        _passengerPosition!.latitude,
+                        _passengerPosition!.longitude,
+                        _destination.latitude,
+                        _destination.longitude) >
+                    20))
           Marker(
             markerId: MarkerId('passenger-${_rideId ?? 'current'}'),
             position: _passengerPosition!,
-            rotation: _passengerBearing ?? 0,
-            flat: _passengerBearing != null,
-            anchor: const Offset(0.5, 0.5),
-            icon: BitmapDescriptor.defaultMarkerWithHue(
-              BitmapDescriptor.hueRed,
-            ),
+            anchor: LiveTrackingMarkerIcons.stopAnchor,
+            icon: _pickupIcon ??
+                BitmapDescriptor.defaultMarkerWithHue(
+                    BitmapDescriptor.hueAzure),
             infoWindow: const InfoWindow(title: 'موقع الراكب المباشر'),
           ),
         Marker(
           markerId: const MarkerId('target'),
           position: _destination,
-          infoWindow: InfoWindow(title: _title),
+          anchor: LiveTrackingMarkerIcons.stopAnchor,
+          icon: (_followsDestination ? _destinationIcon : _pickupIcon) ??
+              BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueAzure),
+          infoWindow: InfoWindow(
+              title: _followsDestination ? 'الوجهة' : 'نقطة الانطلاق'),
         ),
       };
 
   Set<Polyline> get _currentPolylines {
     final points = _remainingRoutePoints;
     if (points.length < 2) return const <Polyline>{};
-    return <Polyline>{
-      Polyline(
+    final color = Theme.of(context).colorScheme.primary;
+    if (identical(_polylinePoints, points) && _polylineColor == color) {
+      return _routePolylines;
+    }
+    _polylinePoints = points;
+    _polylineColor = color;
+    return _routePolylines = <Polyline>{
+      LiveRoutePolyline(
         polylineId: const PolylineId('driver-route'),
         points: points,
-        color: Theme.of(context).colorScheme.primary,
+        color: color,
         width: 6,
       ),
     };
@@ -380,7 +539,17 @@ class _DriverNavigationViewState extends State<DriverNavigationView> {
 
   @override
   Widget build(BuildContext context) => Scaffold(
-        appBar: AppBar(title: Text(_title)),
+        appBar: AppBar(title: Text(_title), actions: [
+          if (_rideId != null &&
+              '${_ride?['driverId']}' == '${_driverController.currentUserId}' &&
+              {3, 4, 5, 8, 9}.contains(int.tryParse('${_ride?['status']}')))
+            IconButton(
+              tooltip: 'محادثة العميل',
+              onPressed: () =>
+                  Get.to<void>(() => DriverChatView(rideId: '$_rideId')),
+              icon: RideChatBadge(rideId: _rideId),
+            ),
+        ]),
         bottomNavigationBar: _rideId == null
             ? null
             : SafeArea(
@@ -408,13 +577,46 @@ class _DriverNavigationViewState extends State<DriverNavigationView> {
               )),
         body: Stack(
           children: <Widget>[
-            AppGoogleMap(
-              initialTarget: _driverPosition ?? _destination,
-              initialZoom: 15,
-              followTarget: _cameraFollowTarget,
-              myLocationEnabled: true,
-              markers: _markers,
-              polylines: _currentPolylines,
+            ValueListenableBuilder<int>(
+              valueListenable: _markerFrameRevision,
+              builder: (context, revision, child) => AppGoogleMap(
+                initialTarget: _driverPosition ?? _destination,
+                initialZoom: 15,
+                followTarget: _cameraFollowTarget,
+                smoothFollow: true,
+                pauseOnUserInteraction: true,
+                followRequestId: _followRequestId,
+                onUserInteraction: () {
+                  if (_followingDriver)
+                    setState(() => _followingDriver = false);
+                },
+                markers: _markers,
+                polylines: _currentPolylines,
+              ),
+            ),
+            Positioned(
+              top: 16,
+              right: 16,
+              child: Material(
+                color: Theme.of(context).colorScheme.surface,
+                elevation: 3,
+                shape: const CircleBorder(),
+                child: IconButton(
+                  key: const ValueKey('driver-recenter'),
+                  tooltip: _followingDriver ? 'توسيط موقعك' : 'متابعة موقعك',
+                  icon: Icon(_followingDriver
+                      ? Icons.my_location_rounded
+                      : Icons.location_searching_rounded),
+                  onPressed: _driverPosition == null
+                      ? null
+                      : () {
+                          setState(() {
+                            _followingDriver = true;
+                            _followRequestId++;
+                          });
+                        },
+                ),
+              ),
             ),
             Positioned(
               right: 16,
@@ -430,6 +632,11 @@ class _DriverNavigationViewState extends State<DriverNavigationView> {
                       Text(_locationAge(
                           operationalText('موقعك', 'Your position'),
                           _driverController.currentPosition.value?.timestamp)),
+                      if ((_driverController.currentPosition.value?.accuracy ??
+                              0) >
+                          75)
+                        const Text(
+                            'الموقع تقريبي · فعّل الموقع الدقيق لتحسين التتبع.'),
                       if (!_followsDestination)
                         Text(_locationAge(
                             operationalText('موقع الراكب', 'Rider position'),
@@ -494,10 +701,11 @@ class _DriverNavigationViewState extends State<DriverNavigationView> {
                           ),
                         ),
                         TextButton(
-                          onPressed: () => _loadRoute(
-                            _driverPosition ?? _origin,
-                            force: true,
-                          ),
+                          onPressed: () {
+                            final origin = _driverPosition ?? _origin;
+                            if (origin != null)
+                              unawaited(_loadRoute(origin, force: true));
+                          },
                           child: const Text('إعادة المحاولة'),
                         ),
                       ],
@@ -535,12 +743,26 @@ class _DriverNavigationViewState extends State<DriverNavigationView> {
   double _number(Object? value) =>
       value is num ? value.toDouble() : double.tryParse('${value ?? ''}') ?? 0;
 
+  LatLng? _coordinates(Object? latitude, Object? longitude) {
+    final lat = double.tryParse('$latitude');
+    final lng = double.tryParse('$longitude');
+    if (lat == null ||
+        lng == null ||
+        !lat.isFinite ||
+        !lng.isFinite ||
+        lat.abs() > 90 ||
+        lng.abs() > 180) return null;
+    return LatLng(lat, lng);
+  }
+
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _positionWorker.dispose();
     _passengerLocationWorker.dispose();
     _rideWorker.dispose();
-    _markerAnimationTimer?.cancel();
+    _markerAnimation.dispose();
+    _markerFrameRevision.dispose();
     _locationAgeTimer?.cancel();
     super.dispose();
   }

@@ -19,6 +19,8 @@ class AuthSessionService extends GetxService {
   final RxBool isAuthenticated = false.obs;
   final RxBool rememberLogin = false.obs;
   final RxnInt currentUserId = RxnInt();
+  Future<void>? _identityValidation;
+  int _sessionGeneration = 0;
 
   String? _pendingRoute;
   Object? _pendingArguments;
@@ -27,6 +29,30 @@ class AuthSessionService extends GetxService {
   Future<void> Function()? onAuthenticated;
   Future<void> Function()? onSignedOut;
   Future<void> Function()? onSessionEnded;
+  Future<void> Function(Map<String, String>)? _onNotificationOpened;
+
+  Future<void> Function(Map<String, String>)? get onNotificationOpened =>
+      _onNotificationOpened;
+
+  set onNotificationOpened(
+    Future<void> Function(Map<String, String>)? handler,
+  ) {
+    _onNotificationOpened = handler;
+    if (handler == null ||
+        !_pendingNotificationOpen ||
+        !isAuthenticated.value ||
+        Get.currentRoute != DriverRoutes.home) {
+      return;
+    }
+    final arguments = _pendingArguments;
+    if (arguments is! Map || arguments['pushNotification'] is! Map) return;
+    final payload =
+        Map<String, String>.from(arguments['pushNotification'] as Map);
+    _pendingRoute = null;
+    _pendingArguments = null;
+    _pendingNotificationOpen = false;
+    unawaited(handler(payload));
+  }
 
   bool get hasPendingNotificationOpen => _pendingNotificationOpen;
 
@@ -50,7 +76,9 @@ class AuthSessionService extends GetxService {
     final refreshToken = await _storage.refreshToken;
     isAuthenticated.value = (accessToken?.isNotEmpty ?? false) ||
         (refreshToken?.isNotEmpty ?? false);
-    currentUserId.value = await _storage.authenticatedUserId;
+    final storedUserId = await _storage.authenticatedUserId;
+    currentUserId.value =
+        storedUserId != null && storedUserId > 0 ? storedUserId : null;
     if (isAuthenticated.value) await _validateStoredSession();
     return this;
   }
@@ -61,12 +89,16 @@ class AuthSessionService extends GetxService {
     required bool remember,
     int? userId,
   }) async {
+    _sessionGeneration++;
+    _identityValidation = null;
     if (remember) {
       await _storage.saveTokens(
         accessToken: accessToken,
         refreshToken: refreshToken,
       );
-      if (userId != null) await _storage.saveAuthenticatedUserId(userId);
+      if (userId != null && userId > 0) {
+        await _storage.saveAuthenticatedUserId(userId);
+      }
     } else {
       await _storage.clear();
       await _storage.holdTemporaryTokens(
@@ -77,11 +109,24 @@ class AuthSessionService extends GetxService {
     await _storage.setRememberMe(remember);
     rememberLogin.value = remember;
     isAuthenticated.value = true;
-    currentUserId.value = userId;
+    currentUserId.value = userId != null && userId > 0 ? userId : null;
+    if (currentUserId.value == null) {
+      await ensureIdentity();
+      return;
+    }
     // Push registration belongs to every authenticated session. The
     // persistence choice only determines whether this session survives an
     // application restart; it must never behave like a sign-out.
     unawaited(onAuthenticated?.call());
+  }
+
+  /// Restores identity for older saved sessions before account-scoped reads
+  /// or location publishing. An outage keeps the session available for retry.
+  Future<bool> ensureIdentity() async {
+    if (!isAuthenticated.value) return false;
+    if (currentUserId.value != null) return true;
+    await _validateStoredSession();
+    return isAuthenticated.value && currentUserId.value != null;
   }
 
   bool requireAuthentication({
@@ -123,9 +168,21 @@ class AuthSessionService extends GetxService {
     }
 
     if (Get.key.currentState != null) {
+      final openNotification = onNotificationOpened;
+      var homeFound = false;
+      Get.until((route) {
+        homeFound = route.settings.name == DriverRoutes.home;
+        return homeFound || route.isFirst;
+      });
+      if (homeFound && openNotification == null) return;
       _pendingRoute = null;
       _pendingArguments = null;
       _pendingNotificationOpen = false;
+      if (openNotification != null) {
+        if (!homeFound) Get.toNamed<void>(DriverRoutes.home);
+        unawaited(openNotification(payload));
+        return;
+      }
       Get.offAllNamed<void>(DriverRoutes.home, arguments: arguments);
     }
   }
@@ -173,20 +230,43 @@ class AuthSessionService extends GetxService {
     await _clearLocalSession(navigate: true);
   }
 
-  Future<void> _validateStoredSession() async {
+  Future<void> _validateStoredSession() {
+    if (_identityValidation != null) return _identityValidation!;
+    final generation = _sessionGeneration;
+    late final Future<void> task;
+    task = _readSessionIdentity(generation).whenComplete(() {
+      if (identical(_identityValidation, task)) _identityValidation = null;
+    });
+    _identityValidation = task;
+    return task;
+  }
+
+  Future<void> _readSessionIdentity(int generation) async {
     final result = await _apiClient.execute<Object?>(
       model: 'UserModel',
       operation: 'get',
       data: const <String, Object?>{},
     );
+    if (generation != _sessionGeneration || !isAuthenticated.value) return;
     if (result is ApiSuccess<Object?>) {
-      if (_hasExpectedAccountType(result.data)) return;
-      await _clearLocalSession(navigate: false);
+      if (!_hasExpectedAccountType(result.data)) {
+        await _clearLocalSession(navigate: false);
+        return;
+      }
+      final user = result.data as Map;
+      final id = int.tryParse('${user['id'] ?? user['Id']}');
+      if (id == null || id <= 0) return;
+      final identityWasMissing = currentUserId.value == null;
+      if (rememberLogin.value) await _storage.saveAuthenticatedUserId(id);
+      if (generation != _sessionGeneration || !isAuthenticated.value) return;
+      currentUserId.value = id;
+      if (identityWasMissing) unawaited(onAuthenticated?.call());
       return;
     }
 
     final failure = result as ApiFailure<Object?>;
-    if (failure.problem.code == 'network_error' ||
+    if (failure.problem.status >= 500 ||
+        failure.problem.code == 'network_error' ||
         failure.problem.code == 'invalid_response') {
       return;
     }
@@ -204,6 +284,8 @@ class AuthSessionService extends GetxService {
       _clearLocalSession(navigate: true);
 
   Future<void> _clearLocalSession({required bool navigate}) async {
+    _sessionGeneration++;
+    _identityValidation = null;
     await onSessionEnded?.call();
     if (Get.isRegistered<TrackingHubService>()) {
       await Get.find<TrackingHubService>().disconnect();

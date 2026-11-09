@@ -4,6 +4,7 @@ import 'package:get/get.dart';
 import '../../../core/network/api_client.dart';
 import '../../../core/network/api_models.dart';
 import '../../../core/realtime/tracking_hub_service.dart';
+import '../../../core/realtime/realtime_state_binding.dart';
 import '../controllers/driver_controller.dart';
 import 'driver_ride_actions.dart';
 import '../../../shared/widgets/ride_financial_follow_up.dart';
@@ -29,10 +30,15 @@ class _DriverArrivalPanelState extends State<DriverArrivalPanel>
   bool _busy = false;
   String? _error;
   StreamSubscription<TrackingHubEvent>? _events;
+  RealtimeStateBinding? _stateBinding;
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _stateBinding = RealtimeStateBinding(owner: this,
+        resources: const {'ride'},
+        accepts: (change) => change.resource == 'ride' && change.resourceId == widget.rideId,
+        refresh: () => _load('get', requireSuccess: true));
     unawaited(_load('get'));
     _timer = Timer.periodic(const Duration(seconds: 15), (_) {
       if (!_busy) unawaited(_load('get'));
@@ -45,9 +51,13 @@ class _DriverArrivalPanelState extends State<DriverArrivalPanel>
       });
   }
 
-  Future<void> _load(String operation) async {
+  Future<void> _load(String operation, {bool requireSuccess = false}) async {
     if (!Get.isRegistered<ApiClient>()) return;
-    if (_busy) return;
+    if (_busy) {
+      if (requireSuccess) throw StateError('Arrival refresh is in progress');
+      return;
+    }
+    final epoch = _stateBinding?.epoch;
     setState(() => _busy = true);
     try {
       final result = await Get.find<ApiClient>().execute<Object?>(
@@ -62,6 +72,7 @@ class _DriverArrivalPanelState extends State<DriverArrivalPanel>
           data: {'rideId': widget.rideId});
       if (pickup is ApiFailure)
         throw FormatException(pickup.problem.detail ?? pickup.problem.title);
+      if (epoch != null && operation == 'get') _stateBinding?.verify(epoch);
       if (mounted)
         setState(() {
           _state = Map<String, Object?>.from(result.data as Map);
@@ -69,10 +80,11 @@ class _DriverArrivalPanelState extends State<DriverArrivalPanel>
               Map<String, Object?>.from((pickup as ApiSuccess).data as Map);
           _error = null;
         });
-    } on Object {
-      if (mounted)
+    } on Object catch (error) {
+      if (mounted && error is! StateSnapshotSuperseded)
         setState(
             () => _error = 'تعذر تحديث التنبيه. تحقق من الاتصال وحاول مجدداً.');
+      if (requireSuccess) rethrow;
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -194,6 +206,7 @@ class _DriverArrivalPanelState extends State<DriverArrivalPanel>
       ]);
   @override
   void dispose() {
+    _stateBinding?.dispose();
     _timer?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     _events?.cancel();
